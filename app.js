@@ -28,7 +28,7 @@ app.use(express.urlencoded({ extended: true }));
 // e.g. ALLOWED_ORIGINS=https://your-app.vercel.app,http://localhost:3000
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-  : ['http://localhost:3000', 'http://localhost:3001'];
+  : ['http://localhost:3000', 'http://localhost:3001', 'https://zat-clinic-system-admin.vercel.app', 'https://zat-clinic-system-frontend.vercel.app'];
 
 app.use(cors({
   origin: (origin, callback) => {
