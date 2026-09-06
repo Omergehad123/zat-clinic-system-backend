@@ -34,11 +34,13 @@ app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (e.g. mobile apps, Postman, server-to-server)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
+    
+    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?$/.test(origin);
+    if (allowedOrigins.includes(origin) || isLocalhost) {
       callback(null, true);
     } else {
       console.warn(`CORS blocked origin: ${origin}`);
-      callback(null, true); // still allow — change to callback(new Error(...)) to strictly block
+      callback(new Error(`CORS error: origin ${origin} is not allowed`));
     }
   },
   credentials: true,

@@ -7,7 +7,21 @@ const getInvoices = async (req, res, next) => {
   try {
     const filter = { ...req.branchFilter };
 
-    if (req.query.month && req.query.year) {
+    if (req.query.category && req.query.category !== 'all') {
+      filter.category = req.query.category;
+    }
+
+    if (req.query.startDate || req.query.endDate) {
+      filter.date = {};
+      if (req.query.startDate) {
+        filter.date.$gte = new Date(req.query.startDate);
+      }
+      if (req.query.endDate) {
+        const end = new Date(req.query.endDate);
+        end.setHours(23, 59, 59, 999);
+        filter.date.$lte = end;
+      }
+    } else if (req.query.month && req.query.year) {
       const m = parseInt(req.query.month) - 1;
       const y = parseInt(req.query.year);
       const startOfMonth = new Date(y, m, 1);

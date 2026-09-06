@@ -1,6 +1,7 @@
 const Patient = require('../models/Patient');
 const PatientPayment = require('../models/PatientPayment');
 const PatientExpense = require('../models/PatientExpense');
+const Transaction = require('../models/Transaction');
 const { logAudit } = require('../utils/audit.utils');
 
 // Helper to attach calculated financial totals to patient object with UI compatibility aliases
@@ -13,7 +14,11 @@ const formatPatientWithFinancials = async (patient) => {
   const expenses = await PatientExpense.find({ patientId });
   const totalExpenses = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 
-  const remaining = Math.max(0, (patient.accommodationAmount || 0) - totalPaid);
+  const accommodationAmount = Number(patient.accommodationAmount || 0);
+  const remaining = Math.max(0, accommodationAmount - totalPaid);
+
+  // صافي الإيرادات = قيمة الإقامة - مصاريف النزيل الشخصية
+  const netRevenue = accommodationAmount - totalExpenses;
 
   // Status Arabic translation
   let statusAr = 'حالي';
@@ -37,13 +42,16 @@ const formatPatientWithFinancials = async (patient) => {
     branchName: bName,
     
     // Canonical backend fields
-    accommodationAmount: patient.accommodationAmount || 0,
+    accommodationAmount,
     paidAmount: totalPaid,
     remainingAmount: remaining,
     totalExpenses,
 
+    // صافي الإيرادات (Net Revenue = accommodationAmount - totalExpenses)
+    netRevenue,
+
     // Frontend UI aliases for complete compatibility
-    stayValue: patient.accommodationAmount || 0,
+    stayValue: accommodationAmount,
     paid: totalPaid,
     remaining: remaining,
     expensesTotal: totalExpenses,
@@ -127,7 +135,8 @@ const createPatient = async (req, res, next) => {
       expectedExitDate, 
       accommodationAmount, 
       stayValue, 
-      firstPayment, 
+      firstPayment,
+      initialExpenses,
       notes, 
       status, 
       branchId 
@@ -160,8 +169,9 @@ const createPatient = async (req, res, next) => {
         branchId: targetBranchId,
         amount: initialPayment,
         date: entryDate || Date.now(),
-        method: 'كاش',
-        notes: 'الدفعة الأولى عند التسجيل'
+        paymentMethod: 'كاش',
+        notes: 'الدفعة الأولى عند التسجيل',
+        createdBy: req.user._id
       });
 
       await Transaction.create({
@@ -170,6 +180,32 @@ const createPatient = async (req, res, next) => {
         date: payment.date,
         category: 'Accommodation',
         description: `دفعة إقامة (الدفعة الأولى) - ${patient.name}`,
+        branchId: targetBranchId,
+        patientId: patient._id,
+        createdBy: req.user._id
+      });
+    }
+
+    // Create initial patient expense record if initialExpenses was provided
+    const finalInitialExpenses = Number(initialExpenses || 0);
+    if (finalInitialExpenses > 0) {
+      await PatientExpense.create({
+        patientId: patient._id,
+        branchId: targetBranchId,
+        description: 'مصاريف ابتدائية عند التسجيل',
+        category: 'أخرى',
+        amount: finalInitialExpenses,
+        date: entryDate || Date.now(),
+        notes: 'مصاريف مسجلة مسبقاً عند إنشاء ملف النزيل',
+        createdBy: req.user._id
+      });
+
+      await Transaction.create({
+        type: 'expense',
+        amount: finalInitialExpenses,
+        date: entryDate || Date.now(),
+        category: 'PatientExpense',
+        description: `مصاريف ابتدائية - ${patient.name}`,
         branchId: targetBranchId,
         patientId: patient._id,
         createdBy: req.user._id
@@ -248,6 +284,7 @@ const deletePatient = async (req, res, next) => {
     if (req.query.permanent === 'true' || req.body.permanent === true) {
       await PatientPayment.deleteMany({ patientId: patient._id });
       await PatientExpense.deleteMany({ patientId: patient._id });
+      await Transaction.deleteMany({ patientId: patient._id });
       await Patient.findByIdAndDelete(patient._id);
 
       await logAudit({

@@ -41,6 +41,19 @@ const createUser = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'البريد الإلكتروني مستخدم بالفعل' });
     }
 
+    // If creating a branch_manager for a branch, remove previous manager's access to that branch
+    if (role === 'branch_manager' && targetBranchId) {
+      await User.updateMany(
+        {
+          branchId: targetBranchId,
+          role: 'branch_manager'
+        },
+        {
+          $set: { branchId: null }
+        }
+      );
+    }
+
     const user = await User.create({
       name,
       email: email.toLowerCase(),
@@ -79,7 +92,7 @@ const createUser = async (req, res, next) => {
 // PUT /api/users/:id
 const updateUser = async (req, res, next) => {
   try {
-    const { name, email, role, branchId, status, password } = req.body;
+    const { name, email, role, branchId, status, password, revokePreviousManagers } = req.body;
     const user = await User.findById(req.params.id);
 
     if (!user) {
@@ -90,10 +103,61 @@ const updateUser = async (req, res, next) => {
       return res.status(403).json({ success: false, message: 'غير مصرح لك بتعديل مستخدم لفرع آخر' });
     }
 
+    const effectiveRole = (role && req.user.role === 'super_admin') ? role : user.role;
+    let newBranchId = user.branchId;
+
+    if (branchId !== undefined && req.user.role === 'super_admin') {
+      newBranchId = (branchId && branchId !== 'null') ? branchId : null;
+    }
+
+    // When assigning a branch to a branch_manager (or changing role to branch_manager, or if revokePreviousManagers is requested):
+    if (req.user.role === 'super_admin' && newBranchId && (effectiveRole === 'branch_manager' || revokePreviousManagers)) {
+      const isBranchChanged = !user.branchId || user.branchId.toString() !== newBranchId.toString();
+      const isRoleChanged = role && role === 'branch_manager' && user.role !== 'branch_manager';
+
+      if (isBranchChanged || isRoleChanged || revokePreviousManagers) {
+        // Find and revoke previous manager(s) of this branch
+        const previousManagers = await User.find({
+          _id: { $ne: user._id },
+          branchId: newBranchId,
+          role: 'branch_manager'
+        });
+
+        if (previousManagers.length > 0) {
+          await User.updateMany(
+            {
+              _id: { $ne: user._id },
+              branchId: newBranchId,
+              role: 'branch_manager'
+            },
+            {
+              $set: { branchId: null }
+            }
+          );
+
+          for (const prev of previousManagers) {
+            await logAudit({
+              user: req.user,
+              action: 'REVOKE_BRANCH_ACCESS',
+              entity: 'User',
+              entityId: prev._id,
+              metadata: {
+                previousBranchId: newBranchId,
+                reassignedToUserId: user._id,
+                reassignedToUserName: user.name
+              }
+            });
+          }
+        }
+      }
+    }
+
     if (name) user.name = name;
     if (email) user.email = email.toLowerCase();
     if (role && req.user.role === 'super_admin') user.role = role;
-    if (branchId !== undefined && req.user.role === 'super_admin') user.branchId = branchId;
+    if (branchId !== undefined && req.user.role === 'super_admin') {
+      user.branchId = newBranchId;
+    }
     if (status) user.status = status;
     if (password) user.password = password;
 
@@ -124,7 +188,7 @@ const updateUser = async (req, res, next) => {
   }
 };
 
-// DELETE /api/users/:id (Deactivate)
+// DELETE /api/users/:id (Deactivate or Permanent Delete)
 const deleteUser = async (req, res, next) => {
   try {
     const user = await User.findById(req.params.id);
@@ -134,6 +198,21 @@ const deleteUser = async (req, res, next) => {
 
     if (req.user.role !== 'super_admin') {
       return res.status(403).json({ success: false, message: 'غير مصرح لغير الأدمن العام بحذف المستخدمين' });
+    }
+
+    if (req.query.permanent === 'true' || req.body.permanent === true) {
+      await User.findByIdAndDelete(user._id);
+
+      await logAudit({
+        user: req.user,
+        action: 'PERMANENT_DELETE_USER',
+        entity: 'User',
+        entityId: user._id,
+        branchId: user.branchId,
+        metadata: { name: user.name, email: user.email }
+      });
+
+      return res.json({ success: true, message: 'تم حذف حساب المستخدم نهائياً' });
     }
 
     user.status = 'inactive';

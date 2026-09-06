@@ -13,7 +13,14 @@ const getBranches = async (req, res, next) => {
 
     const formatted = await Promise.all(
       branches.map(async b => {
-        const manager = await User.findOne({ branchId: b._id, role: 'branch_manager' }).select('name email phone');
+        let manager = await User.findOne({ branchId: b._id, role: 'branch_manager' }).select('name email phone role');
+        if (!manager) {
+          manager = await User.findOne({ branchId: b._id, role: { $in: ['supervisor', 'super_admin'] } }).select('name email phone role');
+        }
+        if (!manager) {
+          manager = await User.findOne({ branchId: b._id }).select('name email phone role');
+        }
+
         return {
           id: b._id.toString(),
           _id: b._id.toString(),
@@ -178,12 +185,27 @@ const updateBranch = async (req, res, next) => {
   }
 };
 
-// DELETE /api/branches/:id (Deactivate branch)
+// DELETE /api/branches/:id (Deactivate or Permanent delete branch)
 const deactivateBranch = async (req, res, next) => {
   try {
     const branch = await Branch.findById(req.params.id);
     if (!branch) {
       return res.status(404).json({ success: false, message: 'الفرع غير موجود' });
+    }
+
+    if (req.query.permanent === 'true' || req.body.permanent === true) {
+      await User.updateMany({ branchId: branch._id }, { $set: { branchId: null } });
+      await Branch.findByIdAndDelete(branch._id);
+
+      await logAudit({
+        user: req.user,
+        action: 'PERMANENT_DELETE_BRANCH',
+        entity: 'Branch',
+        entityId: branch._id,
+        metadata: { name: branch.name }
+      });
+
+      return res.json({ success: true, message: 'تم حذف الفرع نهائياً' });
     }
 
     branch.status = 'inactive';

@@ -7,6 +7,7 @@ const patientSchema = new mongoose.Schema(
     exitDate: { type: Date, default: null },
     branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true, index: true },
     accommodationAmount: { type: Number, default: 0, min: 0 },
+    expenseDeposit: { type: Number, default: 0, min: 0 },
     notes: { type: String, default: '' },
     status: { type: String, enum: ['current', 'discharged'], default: 'current' }
   },
