@@ -38,7 +38,7 @@ const getAdvances = async (req, res, next) => {
     const formatted = advances.map(a => {
       const amt = a.amount || 0;
       totalAmount += amt;
-      const role = a.employeeId ? a.employeeId.role : null;
+      const role = a.employeeId ? a.employeeId.role : (a.role || null);
       if (role && roleTotals[role] !== undefined) {
         roleTotals[role] += amt;
       }
@@ -50,7 +50,7 @@ const getAdvances = async (req, res, next) => {
         id: a._id.toString(),
         _id: a._id.toString(),
         employeeId: a.employeeId ? (a.employeeId._id || a.employeeId).toString() : null,
-        employeeName: a.employeeId ? a.employeeId.name : '',
+        employeeName: a.employeeId ? a.employeeId.name : (a.employeeName || 'موظف سابق (محذوف)'),
         role: role || '',
         employeeType,
         branchId: a.branchId ? (a.branchId._id || a.branchId).toString() : null,
@@ -95,6 +95,8 @@ const createAdvance = async (req, res, next) => {
 
     const advance = await EmployeeAdvance.create({
       employeeId: employee._id,
+      employeeName: employee.name,
+      role: employee.role,
       branchId: employee.branchId,
       amount: numAmount,
       date: date || Date.now(),

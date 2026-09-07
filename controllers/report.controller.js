@@ -111,8 +111,8 @@ const buildReportData = async (branchFilter, month, year) => {
 
   const advanceList = advances.map(a => ({
     id: a._id.toString(),
-    employeeName: a.employeeId ? a.employeeId.name : '',
-    role: a.employeeId ? a.employeeId.role : '',
+    employeeName: a.employeeId ? a.employeeId.name : (a.employeeName || 'موظف سابق (محذوف)'),
+    role: a.employeeId ? a.employeeId.role : (a.role || ''),
     amount: a.amount,
     date: a.date,
     notes: a.notes

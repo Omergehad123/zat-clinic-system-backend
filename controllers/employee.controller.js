@@ -114,7 +114,7 @@ const createEmployee = async (req, res, next) => {
 // PUT /api/employees/:id
 const updateEmployee = async (req, res, next) => {
   try {
-    const { name, role, specialization, status } = req.body;
+    const { name, role, type, specialization, status } = req.body;
     const employee = await Employee.findById(req.params.id);
 
     if (!employee) {
@@ -126,12 +126,22 @@ const updateEmployee = async (req, res, next) => {
     }
 
     if (name) employee.name = name;
-    if (role) {
-      employee.role = role;
-      if (role === 'doctor' && !specialization && !employee.specialization) {
-        return res.status(400).json({ success: false, message: 'التخصص مطلوب للأطباء' });
+    
+    const rawRole = role || type;
+    if (rawRole) {
+      if (rawRole === 'doctor' || rawRole === 'دكتور' || rawRole === 'طبيب') {
+        employee.role = 'doctor';
+      } else if (rawRole === 'nurse' || rawRole === 'تمريض') {
+        employee.role = 'nurse';
+      } else if (rawRole === 'supervisor' || rawRole === 'مشرف') {
+        employee.role = 'supervisor';
+      } else if (rawRole === 'worker' || rawRole === 'عامل') {
+        employee.role = 'worker';
+      } else {
+        employee.role = rawRole;
       }
     }
+
     if (specialization !== undefined) employee.specialization = specialization;
     if (status) employee.status = status;
 
@@ -142,8 +152,14 @@ const updateEmployee = async (req, res, next) => {
       action: 'UPDATE_EMPLOYEE',
       entity: 'Employee',
       entityId: employee._id,
-      branchId: employee.branchId
+      branchId: employee.branchId,
+      metadata: { name: employee.name, role: employee.role }
     });
+
+    let typeAr = 'دكتور';
+    if (employee.role === 'nurse') typeAr = 'تمريض';
+    else if (employee.role === 'supervisor') typeAr = 'مشرف';
+    else if (employee.role === 'worker') typeAr = 'عامل';
 
     res.json({
       success: true,
@@ -152,9 +168,10 @@ const updateEmployee = async (req, res, next) => {
         _id: employee._id.toString(),
         name: employee.name,
         role: employee.role,
+        type: typeAr,
         specialization: employee.specialization,
-        branchId: employee.branchId.toString(),
-        status: employee.status
+        branchId: employee.branchId ? employee.branchId.toString() : null,
+        status: employee.status === 'active' ? 'نشط' : 'معطل'
       }
     });
   } catch (error) {
@@ -162,7 +179,7 @@ const updateEmployee = async (req, res, next) => {
   }
 };
 
-// DELETE /api/employees/:id (Deactivate)
+// DELETE /api/employees/:id (Delete only from Employee table)
 const deleteEmployee = async (req, res, next) => {
   try {
     const employee = await Employee.findById(req.params.id);
@@ -171,21 +188,22 @@ const deleteEmployee = async (req, res, next) => {
     }
 
     if (req.user.role !== 'super_admin' && employee.branchId.toString() !== req.user.branchId.toString()) {
-      return res.status(403).json({ success: false, message: 'غير مصرح لك بتعطيل موظف لفرع آخر' });
+      return res.status(403).json({ success: false, message: 'غير مصرح لك بحذف موظف لفرع آخر' });
     }
 
-    employee.status = 'inactive';
-    await employee.save();
+    // Delete ONLY from the Employee collection table
+    await Employee.findByIdAndDelete(req.params.id);
 
     await logAudit({
       user: req.user,
-      action: 'DEACTIVATE_EMPLOYEE',
+      action: 'DELETE_EMPLOYEE',
       entity: 'Employee',
       entityId: employee._id,
-      branchId: employee.branchId
+      branchId: employee.branchId,
+      metadata: { name: employee.name, role: employee.role }
     });
 
-    res.json({ success: true, message: 'تم تعطيل حساب الموظف بنجاح' });
+    res.json({ success: true, message: 'تم حذف الموظف من جدول الموظفين بنجاح مع الحفاظ على كافة السلف والمعاملات المالية الخاصة به بالنظام' });
   } catch (error) {
     next(error);
   }
