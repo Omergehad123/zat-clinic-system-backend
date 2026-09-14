@@ -27,7 +27,7 @@ function styleWorksheet(sheet, { title, subtitle, columns, rows, summaryRow }) {
     subCell.alignment = { horizontal: 'center', vertical: 'middle' };
     sheet.getRow(currentRow).height = 24;
     currentRow++;
-    
+
     // Spacing row
     sheet.getRow(currentRow).height = 8;
     currentRow++;
@@ -73,9 +73,9 @@ function styleWorksheet(sheet, { title, subtitle, columns, rows, summaryRow }) {
 
       cell.font = { name: 'Arial', size: 10, color: { argb: 'FF1E293B' } };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
-      cell.alignment = { 
-        horizontal: col.align || (col.type === 'currency' || col.type === 'number' ? 'center' : 'right'), 
-        vertical: 'middle' 
+      cell.alignment = {
+        horizontal: col.align || (col.type === 'currency' || col.type === 'number' ? 'center' : 'right'),
+        vertical: 'middle'
       };
       cell.border = {
         top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
@@ -107,9 +107,9 @@ function styleWorksheet(sheet, { title, subtitle, columns, rows, summaryRow }) {
 
       cell.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FF0F172A' } };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } }; // Amber highlight
-      cell.alignment = { 
-        horizontal: col.align || (col.type === 'currency' || col.type === 'number' ? 'center' : 'right'), 
-        vertical: 'middle' 
+      cell.alignment = {
+        horizontal: col.align || (col.type === 'currency' || col.type === 'number' ? 'center' : 'right'),
+        vertical: 'middle'
       };
       cell.border = {
         top: { style: 'thin', color: { argb: 'FF0F172A' } },

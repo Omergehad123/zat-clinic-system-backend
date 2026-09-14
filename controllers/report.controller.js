@@ -1,6 +1,7 @@
 const Transaction = require('../models/Transaction');
 const Patient = require('../models/Patient');
 const PatientPayment = require('../models/PatientPayment');
+const PatientExpense = require('../models/PatientExpense');
 const Employee = require('../models/Employee');
 const Attendance = require('../models/Attendance');
 const EmployeeAdvance = require('../models/EmployeeAdvance');
@@ -16,58 +17,7 @@ const buildReportData = async (branchFilter, month, year) => {
 
   const dateFilter = { date: { $gte: startOfMonth, $lte: endOfMonth } };
 
-  // 1. Transactions in month
-  const transactions = await Transaction.find({
-    ...branchFilter,
-    ...dateFilter
-  });
-
-  let totalIncome = 0;
-  let totalExpenses = 0;
-
-  const incomeBreakdown = { Accommodation: 0, Other: 0 };
-  const expenseBreakdown = {
-    Food: 0,
-    Medicine: 0,
-    Utilities: 0,
-    Maintenance: 0,
-    Supplies: 0,
-    Advances: 0,
-    Other: 0
-  };
-
-  transactions.forEach(t => {
-    if (t.type === 'income') {
-      totalIncome += t.amount;
-      if (t.category === 'Accommodation' || t.category === 'إقامة') {
-        incomeBreakdown.Accommodation += t.amount;
-      } else {
-        incomeBreakdown.Other += t.amount;
-      }
-    } else if (t.type === 'expense') {
-      totalExpenses += t.amount;
-      const cat = t.category || '';
-      if (cat === 'Employee Advances' || cat.includes('سلف')) {
-        expenseBreakdown.Advances += t.amount;
-      } else if (cat === 'Food' || cat.includes('أكل')) {
-        expenseBreakdown.Food += t.amount;
-      } else if (cat === 'Medicine' || cat.includes('أدوية')) {
-        expenseBreakdown.Medicine += t.amount;
-      } else if (cat === 'Utilities' || cat.includes('مرافق')) {
-        expenseBreakdown.Utilities += t.amount;
-      } else if (cat === 'Maintenance' || cat.includes('صيانة')) {
-        expenseBreakdown.Maintenance += t.amount;
-      } else if (cat === 'Supplies' || cat.includes('مستلزمات')) {
-        expenseBreakdown.Supplies += t.amount;
-      } else {
-        expenseBreakdown.Other += t.amount;
-      }
-    }
-  });
-
-  const netIncome = totalIncome - totalExpenses;
-
-  // 2. Patient metrics
+  // 1. All Patients metrics & patient net revenues
   const allPatients = await Patient.find({ ...branchFilter });
   const currentPatientsCount = allPatients.filter(p => p.status === 'current').length;
 
@@ -82,15 +32,24 @@ const buildReportData = async (branchFilter, month, year) => {
     exitDate: { $gte: startOfMonth, $lte: endOfMonth }
   });
 
-  // Calculate outstanding payments across patients
   let outstandingPayments = 0;
+  let totalPatientPaid = 0;
+  let totalPatientExpenses = 0;
+  let patientNetRevenueTotal = 0;
   const patientDetailedList = [];
 
   for (const patient of allPatients) {
     const payments = await PatientPayment.find({ patientId: patient._id });
     const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const expenses = await PatientExpense.find({ patientId: patient._id });
+    const pExpenses = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
     const remaining = Math.max(0, (patient.accommodationAmount || 0) - totalPaid);
+    const pNet = totalPaid - pExpenses;
+
     outstandingPayments += remaining;
+    totalPatientPaid += totalPaid;
+    totalPatientExpenses += pExpenses;
+    patientNetRevenueTotal += pNet;
 
     patientDetailedList.push({
       id: patient._id.toString(),
@@ -99,9 +58,72 @@ const buildReportData = async (branchFilter, month, year) => {
       accommodationAmount: patient.accommodationAmount || 0,
       paidAmount: totalPaid,
       remainingAmount: remaining,
+      totalExpenses: pExpenses,
+      netRevenue: pNet,
       status: patient.status
     });
   }
+
+  // 2. Transactions & Expenses
+  const transactions = await Transaction.find({
+    ...branchFilter
+  });
+
+  const expenseBreakdown = {
+    Food: 0,
+    Medicine: 0,
+    Utilities: 0,
+    Maintenance: 0,
+    Supplies: 0,
+    Advances: 0,
+    PatientExpenses: totalPatientExpenses,
+    Other: 0
+  };
+
+  let generalExpensesSum = 0;
+  transactions.forEach(t => {
+    if (t.type === 'expense') {
+      const cat = t.category || '';
+      if (cat === 'Employee Advances' || cat.includes('سلف')) {
+        expenseBreakdown.Advances += t.amount;
+        generalExpensesSum += t.amount;
+      } else if (cat === 'PatientExpense' || cat === 'Patient Expense' || cat.includes('مصاريف النزيل') || cat.includes('مصاريف ابتدائية')) {
+        // Handled via totalPatientExpenses
+      } else if (cat === 'Food' || cat.includes('أكل')) {
+        expenseBreakdown.Food += t.amount;
+        generalExpensesSum += t.amount;
+      } else if (cat === 'Medicine' || cat.includes('أدوية')) {
+        expenseBreakdown.Medicine += t.amount;
+        generalExpensesSum += t.amount;
+      } else if (cat === 'Utilities' || cat.includes('مرافق')) {
+        expenseBreakdown.Utilities += t.amount;
+        generalExpensesSum += t.amount;
+      } else if (cat === 'Maintenance' || cat.includes('صيانة')) {
+        expenseBreakdown.Maintenance += t.amount;
+        generalExpensesSum += t.amount;
+      } else if (cat === 'Supplies' || cat.includes('مستلزمات')) {
+        expenseBreakdown.Supplies += t.amount;
+        generalExpensesSum += t.amount;
+      } else {
+        expenseBreakdown.Other += t.amount;
+        generalExpensesSum += t.amount;
+      }
+    }
+  });
+
+  // 1. إجمالي الإيرادات = مجموع صافي إيرادات النزلاء (المدفوع - مصاريف النزيل)
+  const totalIncome = allPatients.length > 0 ? patientNetRevenueTotal : totalPatientPaid;
+
+  // 2. إجمالي المصروفات والسلف = مجموع كل الفواتير والمصروفات العامة + السلف + مصاريف النزلاء
+  const totalExpenses = generalExpensesSum + totalPatientExpenses;
+
+  // 3. صافي الإيرادات = إجمالي الإيرادات - إجمالي المصروفات والسلف
+  const netIncome = totalIncome - totalExpenses;
+
+  const incomeBreakdown = {
+    Accommodation: totalIncome,
+    Other: 0
+  };
 
   // 3. Employee Advances in month
   const advances = await EmployeeAdvance.find({
