@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getAttendance, recordAttendance } = require('../controllers/attendance.controller');
+const { getAttendance, recordAttendance, deleteAttendance } = require('../controllers/attendance.controller');
 const { protect } = require('../middleware/auth.middleware');
 const { branchIsolation } = require('../middleware/role.middleware');
 
@@ -9,5 +9,6 @@ router.use(branchIsolation);
 
 router.get('/', getAttendance);
 router.post('/', recordAttendance);
+router.delete('/:id', deleteAttendance);
 
 module.exports = router;

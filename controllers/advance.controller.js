@@ -143,4 +143,69 @@ const createAdvance = async (req, res, next) => {
   }
 };
 
-module.exports = { getAdvances, createAdvance };
+// PUT /api/advances/:id
+const updateAdvance = async (req, res, next) => {
+  try {
+    const advance = await EmployeeAdvance.findById(req.params.id);
+    if (!advance) {
+      return res.status(404).json({ success: false, message: 'السلفة غير موجودة' });
+    }
+
+    if (req.user.role !== 'super_admin' && advance.branchId.toString() !== req.user.branchId.toString()) {
+      return res.status(403).json({ success: false, message: 'غير مصرح لك بتعديل هذه السلفة' });
+    }
+
+    const { amount, date, notes } = req.body;
+    if (amount !== undefined) advance.amount = Number(amount);
+    if (date !== undefined) advance.date = date;
+    if (notes !== undefined) advance.notes = notes;
+
+    await advance.save();
+
+    await logAudit({
+      user: req.user,
+      action: 'UPDATE_EMPLOYEE_ADVANCE',
+      entity: 'EmployeeAdvance',
+      entityId: advance._id,
+      branchId: advance.branchId,
+      metadata: { amount: advance.amount }
+    });
+
+    res.json({ success: true, data: advance });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// DELETE /api/advances/:id
+const deleteAdvance = async (req, res, next) => {
+  try {
+    const advance = await EmployeeAdvance.findById(req.params.id);
+    if (!advance) {
+      return res.status(404).json({ success: false, message: 'السلفة غير موجودة' });
+    }
+
+    if (req.user.role !== 'super_admin' && advance.branchId.toString() !== req.user.branchId.toString()) {
+      return res.status(403).json({ success: false, message: 'غير مصرح لك بحذف هذه السلفة' });
+    }
+
+    const empId = advance.employeeId;
+    const amt = advance.amount;
+    await EmployeeAdvance.findByIdAndDelete(req.params.id);
+
+    await logAudit({
+      user: req.user,
+      action: 'DELETE_EMPLOYEE_ADVANCE',
+      entity: 'EmployeeAdvance',
+      entityId: advance._id,
+      branchId: advance.branchId,
+      metadata: { employeeId: empId, amount: amt }
+    });
+
+    res.json({ success: true, message: 'تم حذف السلفة بنجاح' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { getAdvances, createAdvance, updateAdvance, deleteAdvance };

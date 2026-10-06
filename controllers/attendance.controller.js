@@ -135,4 +135,33 @@ const recordAttendance = async (req, res, next) => {
   }
 };
 
-module.exports = { getAttendance, recordAttendance };
+// DELETE /api/attendance/:id
+const deleteAttendance = async (req, res, next) => {
+  try {
+    const record = await Attendance.findById(req.params.id);
+    if (!record) {
+      return res.status(404).json({ success: false, message: 'سجل الحضور غير موجود' });
+    }
+
+    if (req.user.role !== 'super_admin' && record.branchId.toString() !== req.user.branchId.toString()) {
+      return res.status(403).json({ success: false, message: 'غير مصرح لك بحذف هذا السجل' });
+    }
+
+    await Attendance.findByIdAndDelete(req.params.id);
+
+    await logAudit({
+      user: req.user,
+      action: 'DELETE_ATTENDANCE',
+      entity: 'Attendance',
+      entityId: record._id,
+      branchId: record.branchId,
+      metadata: { employeeId: record.employeeId, date: record.date, status: record.status }
+    });
+
+    res.json({ success: true, message: 'تم حذف سجل الحضور بنجاح' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { getAttendance, recordAttendance, deleteAttendance };
