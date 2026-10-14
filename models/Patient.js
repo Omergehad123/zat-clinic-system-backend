@@ -10,6 +10,8 @@ const timelineEventSchema = new mongoose.Schema(
     title: { type: String, required: true },
     date: { type: Date, default: Date.now },
     amount: { type: Number, default: 0 },
+    firstPayment: { type: Number, default: 0 },
+    initialExpenses: { type: Number, default: 0 },
     details: { type: String, default: '' },
     periodStart: { type: Date },
     periodEnd: { type: Date },

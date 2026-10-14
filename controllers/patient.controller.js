@@ -77,6 +77,23 @@ const formatPatientWithFinancials = async (patient) => {
     status: statusAr,
     statusEn: patient.status,
     timeline,
+    payments: payments.map(p => ({
+      id: p._id.toString(),
+      _id: p._id.toString(),
+      amount: p.amount,
+      date: p.date,
+      paymentMethod: p.paymentMethod,
+      notes: p.notes
+    })),
+    expenses: expenses.map(e => ({
+      id: e._id.toString(),
+      _id: e._id.toString(),
+      amount: e.amount,
+      date: e.date,
+      category: e.category,
+      description: e.description,
+      notes: e.notes
+    })),
     createdAt: patient.createdAt,
     updatedAt: patient.updatedAt
   };
@@ -322,6 +339,8 @@ const renewPatient = async (req, res, next) => {
       mode = 'add', // 'add' to accumulate, 'replace' to overwrite
       firstPayment, 
       paymentMethod = 'كاش', 
+      initialExpenses,
+      expenses,
       expenseDeposit,
       notes 
     } = req.body;
@@ -331,13 +350,15 @@ const renewPatient = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'النزيل غير موجود' });
     }
 
-    if (req.user.role !== 'super_admin' && patient.branchId && patient.branchId.toString() !== req.user.branchId?.toString()) {
+    if (req.user.role !== 'super_admin' && patient.branchId && req.user.branchId && patient.branchId.toString() !== req.user.branchId.toString()) {
       return res.status(403).json({ success: false, message: 'غير مصرح لك بتجديد إقامة نزيل لفرع آخر' });
     }
 
     const renewValue = Number(accommodationAmount ?? stayValue ?? 0);
     const effectiveRenewDate = renewDate ? new Date(renewDate) : new Date();
-    const effectiveExitDate = expectedExitDate ? new Date(expectedExitDate) : null;
+    const effectiveExitDate = (expectedExitDate && String(expectedExitDate).trim() !== '') ? new Date(expectedExitDate) : null;
+    const initialPayment = Number(firstPayment || 0);
+    const expenseAmount = Number(initialExpenses || expenses || 0);
 
     if (mode === 'replace') {
       patient.accommodationAmount = renewValue;
@@ -372,6 +393,8 @@ const renewPatient = async (req, res, next) => {
       amount: renewValue,
       periodStart: effectiveRenewDate,
       periodEnd: effectiveExitDate,
+      firstPayment: initialPayment,
+      initialExpenses: expenseAmount,
       details: notes || `تم تجديد الإقامة بقيمة ${renewValue} جنيه`,
       createdBy: req.user._id
     });
@@ -379,7 +402,6 @@ const renewPatient = async (req, res, next) => {
     await patient.save();
 
     // If firstPayment is provided on renewal
-    const initialPayment = Number(firstPayment || 0);
     if (initialPayment > 0) {
       const payment = await PatientPayment.create({
         patientId: patient._id,
@@ -413,6 +435,41 @@ const renewPatient = async (req, res, next) => {
       await patient.save();
     }
 
+    // If initial expenses provided on renewal
+    if (expenseAmount > 0) {
+      await PatientExpense.create({
+        patientId: patient._id,
+        branchId: patient.branchId,
+        description: 'مصاريف مع تجديد الإقامة',
+        category: 'أخرى',
+        amount: expenseAmount,
+        date: effectiveRenewDate,
+        notes: `مصاريف مسجلة عند تجديد الإقامة${notes ? ` - ${notes}` : ''}`,
+        createdBy: req.user._id
+      });
+
+      await Transaction.create({
+        type: 'expense',
+        amount: expenseAmount,
+        date: effectiveRenewDate,
+        category: 'PatientExpense',
+        description: `مصاريف تجديد إقامة - ${patient.name}`,
+        branchId: patient.branchId,
+        patientId: patient._id,
+        createdBy: req.user._id
+      });
+
+      patient.timeline.push({
+        type: 'expense',
+        title: 'مصروف عند تجديد الإقامة',
+        date: effectiveRenewDate,
+        amount: expenseAmount,
+        details: `مصاريف مسجلة عند تجديد الإقامة`,
+        createdBy: req.user._id
+      });
+      await patient.save();
+    }
+
     await logAudit({
       user: req.user,
       action: 'RENEW_PATIENT',
@@ -424,6 +481,7 @@ const renewPatient = async (req, res, next) => {
         renewalDate: effectiveRenewDate, 
         renewValue, 
         firstPayment: initialPayment,
+        initialExpenses: expenseAmount,
         newTotalAccommodation: patient.accommodationAmount
       }
     });
@@ -452,19 +510,54 @@ const updatePatient = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'المريض غير موجود' });
     }
 
-    if (req.user.role !== 'super_admin' && patient.branchId && patient.branchId.toString() !== req.user.branchId?.toString()) {
+    if (req.user.role !== 'super_admin' && patient.branchId && req.user.branchId && patient.branchId.toString() !== req.user.branchId.toString()) {
       return res.status(403).json({ success: false, message: 'غير مصرح لك بتعديل مريض لفرع آخر' });
     }
 
-    if (name) patient.name = name;
-    if (entryDate) patient.entryDate = entryDate;
-    if (exitDate !== undefined || expectedExitDate !== undefined) patient.exitDate = exitDate || expectedExitDate;
-    if (accommodationAmount !== undefined || stayValue !== undefined) {
-      patient.accommodationAmount = Number(accommodationAmount ?? stayValue);
+    if (name) patient.name = name.trim();
+    if (entryDate) {
+      const parsed = new Date(entryDate);
+      if (!isNaN(parsed.getTime())) {
+        patient.entryDate = parsed;
+      }
     }
-    if (expenseDeposit !== undefined) patient.expenseDeposit = Number(expenseDeposit);
-    if (notes !== undefined) patient.notes = notes;
-    if (status) patient.status = status;
+    
+    // Safely handle exitDate / expectedExitDate (empty string becomes null, avoiding Mongoose CastError)
+    if (exitDate !== undefined || expectedExitDate !== undefined) {
+      const chosenExit = exitDate || expectedExitDate;
+      if (chosenExit && String(chosenExit).trim() !== '') {
+        const parsedExit = new Date(chosenExit);
+        patient.exitDate = !isNaN(parsedExit.getTime()) ? parsedExit : null;
+      } else {
+        patient.exitDate = null;
+      }
+    }
+
+    if (accommodationAmount !== undefined || stayValue !== undefined) {
+      const val = accommodationAmount ?? stayValue;
+      if (val !== '' && !isNaN(Number(val))) {
+        patient.accommodationAmount = Number(val);
+      }
+    }
+
+    if (expenseDeposit !== undefined) {
+      if (expenseDeposit !== '' && !isNaN(Number(expenseDeposit))) {
+        patient.expenseDeposit = Number(expenseDeposit);
+      }
+    }
+
+    if (notes !== undefined) {
+      patient.notes = notes;
+    }
+
+    if (status) {
+      let statusEn = status;
+      if (status === 'حالي') statusEn = 'current';
+      if (status === 'خرج') statusEn = 'discharged';
+      if (['current', 'discharged'].includes(statusEn)) {
+        patient.status = statusEn;
+      }
+    }
 
     await patient.save();
 
@@ -474,12 +567,13 @@ const updatePatient = async (req, res, next) => {
       entity: 'Patient',
       entityId: patient._id,
       branchId: patient.branchId,
-      metadata: { status: patient.status }
+      metadata: { name: patient.name, status: patient.status }
     });
 
     const formatted = await formatPatientWithFinancials(patient);
-    res.json({ success: true, data: { ...formatted, timeline: patient.timeline } });
+    res.json({ success: true, message: 'تم تعديل بيانات النزيل بنجاح', data: { ...formatted, timeline: patient.timeline } });
   } catch (error) {
+    console.error('Error in updatePatient:', error);
     next(error);
   }
 };
