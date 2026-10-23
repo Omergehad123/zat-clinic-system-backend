@@ -101,42 +101,43 @@ const buildReportData = async (branchFilter, month, year) => {
 
   if (isAllMonths) {
     // 1. All Months aggregation
-    let allPaidSum = 0;
+    let allStaySum = 0;
     let allPatientExpSum = 0;
 
-    const groups = {};
     allPatients.forEach(patient => {
-      const entryKey = formatDateToKey(patient.entryDate || patient.createdAt) || `${targetY}-01`;
-      if (!groups[entryKey]) groups[entryKey] = [];
-      groups[entryKey].push(patient);
+      const entryEvent = Array.isArray(patient.timeline) ? patient.timeline.find(e => e.type === 'entry') : null;
+      const renewalEvents = Array.isArray(patient.timeline) ? patient.timeline.filter(e => e.type === 'renewal') : [];
+      const sumRenewals = renewalEvents.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      
+      let entryStay = 0;
+      if (entryEvent && entryEvent.amount) {
+        entryStay = Number(entryEvent.amount);
+      } else if (sumRenewals > 0) {
+        entryStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - sumRenewals);
+      } else {
+        entryStay = Number(patient.accommodationAmount ?? patient.stayValue ?? 0);
+      }
+      allStaySum += entryStay;
 
       const seenRenewalMonths = new Set();
       if (Array.isArray(patient.timeline)) {
-        patient.timeline
-          .filter(e => e.type === 'renewal')
-          .forEach((renEvent) => {
-            const renKey = formatDateToKey(renEvent.date);
-            if (renKey && !seenRenewalMonths.has(renKey)) {
-              seenRenewalMonths.add(renKey);
-              if (!groups[renKey]) groups[renKey] = [];
-              groups[renKey].push(patient);
-            }
-          });
+        renewalEvents.forEach((renEvent) => {
+          const renKey = formatDateToKey(renEvent.date);
+          if (renKey && !seenRenewalMonths.has(renKey)) {
+            seenRenewalMonths.add(renKey);
+            allStaySum += Number(renEvent.amount || 0);
+          }
+        });
       }
 
       const lastRenKey = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
       if (lastRenKey && !seenRenewalMonths.has(lastRenKey)) {
         seenRenewalMonths.add(lastRenKey);
-        if (!groups[lastRenKey]) groups[lastRenKey] = [];
-        groups[lastRenKey].push(patient);
+        const fallbackStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - entryStay);
+        allStaySum += fallbackStay;
       }
-    });
 
-    Object.values(groups).forEach(items => {
-      items.forEach(p => {
-        allPaidSum += Number(p.paidAmount ?? p.paid ?? 0);
-        allPatientExpSum += Number(p.totalExpenses ?? p.expensesTotal ?? 0);
-      });
+      allPatientExpSum += Number(patient.totalExpenses ?? patient.expensesTotal ?? 0);
     });
 
     const totalInvoicesSum = allInvoices.reduce((s, inv) => s + Number(inv.totalAmount || 0), 0);
@@ -152,7 +153,7 @@ const buildReportData = async (branchFilter, month, year) => {
       }
     });
 
-    totalIncome = allPaidSum;
+    totalIncome = allStaySum;
     totalExpenses = totalInvoicesSum + totalAdvancesSum + allPatientExpSum + allDirectOtherSum;
     netIncome = totalIncome - totalExpenses;
 
@@ -165,32 +166,55 @@ const buildReportData = async (branchFilter, month, year) => {
     const monthKey = `${targetY}-${String(targetM).padStart(2, '0')}`;
     const { start, end } = getMonthDateRange(targetY, targetM);
 
-    // Paid & Patient Expenses for this month's drawer
-    let monthPaid = 0;
+    // Stay Value & Patient Expenses for this month's drawer
+    let monthStay = 0;
     let monthPatientExpenses = 0;
 
     allPatients.forEach(patient => {
       const entryKey = formatDateToKey(patient.entryDate || patient.createdAt);
-      const renewalKeys = new Set();
-      if (Array.isArray(patient.timeline)) {
-        patient.timeline
-          .filter(e => e.type === 'renewal')
-          .forEach(e => {
-            const rk = formatDateToKey(e.date);
-            if (rk) renewalKeys.add(rk);
-          });
+      const entryEvent = Array.isArray(patient.timeline) ? patient.timeline.find(e => e.type === 'entry') : null;
+      const renewalEvents = Array.isArray(patient.timeline) ? patient.timeline.filter(e => e.type === 'renewal') : [];
+      const sumRenewals = renewalEvents.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      
+      let entryStay = 0;
+      if (entryEvent && entryEvent.amount) {
+        entryStay = Number(entryEvent.amount);
+      } else if (sumRenewals > 0) {
+        entryStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - sumRenewals);
+      } else {
+        entryStay = Number(patient.accommodationAmount ?? patient.stayValue ?? 0);
       }
-      const lastRenKey = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
-      if (lastRenKey) renewalKeys.add(lastRenKey);
 
-      const pPaid = Number(patient.paidAmount ?? patient.paid ?? 0);
-      const pExp = Number(patient.totalExpenses ?? patient.expensesTotal ?? 0);
+      if (entryKey === monthKey) {
+        monthStay += entryStay;
+      }
+
+      const seenRenewalMonths = new Set();
+      if (Array.isArray(patient.timeline)) {
+        renewalEvents.forEach((renEvent) => {
+          const renKey = formatDateToKey(renEvent.date);
+          if (renKey && !seenRenewalMonths.has(renKey)) {
+            seenRenewalMonths.add(renKey);
+            if (renKey === monthKey) {
+              monthStay += Number(renEvent.amount || 0);
+            }
+          }
+        });
+      }
+
+      const lastRenKey = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
+      if (lastRenKey && !seenRenewalMonths.has(lastRenKey)) {
+        seenRenewalMonths.add(lastRenKey);
+        if (lastRenKey === monthKey) {
+          const fallbackStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - entryStay);
+          monthStay += fallbackStay;
+        }
+      }
 
       const matchesEntry = entryKey === monthKey;
-      const matchesRenewal = renewalKeys.has(monthKey);
-
+      const matchesRenewal = seenRenewalMonths.has(monthKey) || lastRenKey === monthKey;
       if (matchesEntry || matchesRenewal) {
-        monthPaid += pPaid;
+        const pExp = Number(patient.totalExpenses ?? patient.expensesTotal ?? 0);
         monthPatientExpenses += pExp;
       }
     });
@@ -227,7 +251,7 @@ const buildReportData = async (branchFilter, month, year) => {
       }
     });
 
-    totalIncome = monthPaid;
+    totalIncome = monthStay;
     totalExpenses = invoicesSum + advancesSum + monthPatientExpenses + directOtherSum;
     netIncome = totalIncome - totalExpenses;
 
