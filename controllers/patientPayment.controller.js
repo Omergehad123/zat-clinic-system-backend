@@ -82,7 +82,7 @@ const createPatientPayment = async (req, res, next) => {
       entity: 'PatientPayment',
       entityId: payment._id,
       branchId: patient.branchId,
-      metadata: { patientId: patient._id, amount: numAmount }
+      metadata: { patientId: patient._id, amount: numAmount, patientName: patient.name }
     });
 
     res.status(201).json({
@@ -104,4 +104,143 @@ const createPatientPayment = async (req, res, next) => {
   }
 };
 
-module.exports = { getPatientPayments, createPatientPayment };
+// DELETE /api/patient-payments/:id
+const deletePatientPayment = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    // Super admin role enforcement
+    if (req.user.role !== 'super_admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'غير مصرح: حذف دفعات سداد الإقامة متاح لمدير النظام (Super Admin) فقط'
+      });
+    }
+
+    let payment = await PatientPayment.findById(id);
+    let patient = null;
+    let paymentAmount = 0;
+    let paymentDate = null;
+    let patientId = null;
+    let branchId = null;
+
+    if (payment) {
+      patientId = payment.patientId;
+      paymentAmount = Number(payment.amount || 0);
+      paymentDate = payment.date;
+      branchId = payment.branchId;
+
+      patient = await Patient.findById(patientId);
+
+      // 1. Delete the PatientPayment document
+      await PatientPayment.findByIdAndDelete(id);
+
+      // 2. Remove matching income Transaction
+      const payTime = new Date(paymentDate).getTime();
+      const txList = await Transaction.find({
+        patientId,
+        category: 'Accommodation',
+        type: 'income',
+        amount: paymentAmount
+      });
+
+      let bestTx = null;
+      let minDiff = Infinity;
+      for (const tx of txList) {
+        const diff = Math.abs(new Date(tx.date).getTime() - payTime);
+        if (diff < minDiff) {
+          minDiff = diff;
+          bestTx = tx;
+        }
+      }
+      if (bestTx) {
+        await Transaction.findByIdAndDelete(bestTx._id);
+      }
+
+      // 3. Remove from patient.timeline if present
+      if (patient && Array.isArray(patient.timeline)) {
+        const tlIndex = patient.timeline.findIndex(ev =>
+          ev.type === 'payment' &&
+          Number(ev.amount) === paymentAmount &&
+          Math.abs(new Date(ev.date).getTime() - payTime) <= 24 * 60 * 60 * 1000
+        );
+        if (tlIndex !== -1) {
+          patient.timeline.splice(tlIndex, 1);
+          await patient.save();
+        }
+      }
+    } else {
+      // Fallback: check if id is a subdocument ID in a Patient's timeline
+      patient = await Patient.findOne({ 'timeline._id': id });
+      if (patient) {
+        const tlEvent = patient.timeline.id(id);
+        if (tlEvent) {
+          patientId = patient._id;
+          paymentAmount = Number(tlEvent.amount || 0);
+          paymentDate = tlEvent.date;
+          branchId = patient.branchId;
+
+          const payTime = new Date(paymentDate).getTime();
+
+          // Try to find matching PatientPayment
+          const matchingPayment = await PatientPayment.findOne({
+            patientId,
+            amount: paymentAmount
+          }).sort({ createdAt: -1 });
+
+          if (matchingPayment) {
+            await PatientPayment.findByIdAndDelete(matchingPayment._id);
+          }
+
+          // Try to delete matching transaction
+          const txList = await Transaction.find({
+            patientId,
+            category: 'Accommodation',
+            type: 'income',
+            amount: paymentAmount
+          });
+          let bestTx = null;
+          let minDiff = Infinity;
+          for (const tx of txList) {
+            const diff = Math.abs(new Date(tx.date).getTime() - payTime);
+            if (diff < minDiff) {
+              minDiff = diff;
+              bestTx = tx;
+            }
+          }
+          if (bestTx) {
+            await Transaction.findByIdAndDelete(bestTx._id);
+          }
+
+          // Pull from timeline
+          patient.timeline.pull(id);
+          await patient.save();
+        }
+      } else {
+        return res.status(404).json({ success: false, message: 'دفعة السداد غير موجودة' });
+      }
+    }
+
+    await logAudit({
+      user: req.user,
+      action: 'DELETE_PATIENT_PAYMENT',
+      entity: 'PatientPayment',
+      entityId: id,
+      branchId: branchId || (patient ? patient.branchId : null),
+      metadata: {
+        patientId,
+        amount: paymentAmount,
+        patientName: patient ? patient.name : ''
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'تم حذف دفعة السداد بنجاح وتحديث حساب النزيل وسجل المعاملات'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { getPatientPayments, createPatientPayment, deletePatientPayment };

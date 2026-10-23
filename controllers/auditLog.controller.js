@@ -1,4 +1,4 @@
-﻿const AuditLog = require('../models/AuditLog');
+const AuditLog = require('../models/AuditLog');
 
 // Map action codes to Arabic labels
 const actionLabels = {
@@ -17,6 +17,7 @@ const actionLabels = {
   RENEW_PATIENT: 'تجديد إقامة نزيل',
   ADD_PAYMENT: 'إضافة دفعة سداد',
   CREATE_PAYMENT: 'إضافة دفعة سداد',
+  DELETE_PATIENT_PAYMENT: 'حذف دفعة سداد',
   ADD_PATIENT_EXPENSE: 'إضافة مصروف نزيل',
   CREATE_PATIENT_EXPENSE: 'إضافة مصروف نزيل',
   CREATE_EXPENSE: 'إضافة مصروف',
@@ -70,10 +71,11 @@ const buildItemDescription = (action, entity, metadata) => {
 
     case 'ADD_PAYMENT':
     case 'CREATE_PAYMENT':
+    case 'DELETE_PATIENT_PAYMENT':
       if (m.patientName) {
-        return m.patientName + (m.amount != null ? ' — ' + Number(m.amount).toLocaleString('ar-EG') + ' ج.م' : '');
+        return (action === 'DELETE_PATIENT_PAYMENT' ? 'حذف دفعة: ' : '') + m.patientName + (m.amount != null ? ' — ' + Number(m.amount).toLocaleString('ar-EG') + ' ج.م' : '');
       }
-      return entity;
+      return m.amount != null ? 'دفعة بمبلغ ' + Number(m.amount).toLocaleString('ar-EG') + ' ج.م' : entity;
 
     case 'ADD_PATIENT_EXPENSE':
     case 'CREATE_PATIENT_EXPENSE':
