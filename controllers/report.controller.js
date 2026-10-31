@@ -66,11 +66,12 @@ const buildReportData = async (branchFilter, month, year) => {
   const targetY = parseInt(year) || new Date().getFullYear();
 
   // Load all raw data for the branch in parallel
-  const [allPatientsRaw, allInvoices, allAdvances, allTransactions] = await Promise.all([
+  const [allPatientsRaw, allInvoices, allAdvances, allTransactions, allEmployees] = await Promise.all([
     Patient.find({ ...branchFilter }),
     Invoice.find({ ...branchFilter }),
     EmployeeAdvance.find({ ...branchFilter }).populate('employeeId', 'name role'),
-    Transaction.find({ ...branchFilter })
+    Transaction.find({ ...branchFilter }),
+    Employee.find({ ...branchFilter })
   ]);
 
   // Format all patients with their financial calculations (payments and expenses)
@@ -365,7 +366,9 @@ const buildReportData = async (branchFilter, month, year) => {
     transactions: allTransactions,
     patients: allPatients,
     attendance: attendanceRecords,
-    advances: advanceList
+    advances: advanceList,
+    invoices: activeInvoices,
+    employees: allEmployees
   };
 };
 
@@ -442,6 +445,22 @@ const exportExcel = async (req, res, next) => {
 
     const reportData = await buildReportData(req.branchFilter, month, year);
 
+    let previousSettlement = 0;
+    if (month !== 'all' && month !== 'ALL') {
+      let prevM = Number(month) - 1;
+      let prevY = Number(year);
+      if (prevM === 0) {
+        prevM = 12;
+        prevY -= 1;
+      }
+      try {
+        const prevReportData = await buildReportData(req.branchFilter, prevM, prevY);
+        previousSettlement = prevReportData?.summary?.netIncome || 0;
+      } catch (e) {
+        console.error('Error fetching prev month for settlement:', e);
+      }
+    }
+
     let branchComparison = [];
     if (req.user.role === 'super_admin') {
       const branches = await Branch.find({ status: 'active' });
@@ -467,7 +486,10 @@ const exportExcel = async (req, res, next) => {
       patients: reportData.patients,
       attendance: reportData.attendance,
       advances: reportData.advances,
-      branchComparison
+      invoices: reportData.invoices,
+      employees: reportData.employees,
+      branchComparison,
+      previousSettlement
     });
 
     res.setHeader(
