@@ -33,6 +33,22 @@ const formatPatientWithFinancials = async (patient) => {
 
   const timeline = patient.timeline || [];
   const renewalEvents = timeline.filter(e => e.type === 'renewal');
+  const sumRenewals = renewalEvents.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const expectedEntryAmount = renewalEvents.length > 0
+    ? Math.max(0, accommodationAmount - sumRenewals)
+    : accommodationAmount;
+
+  const normalizedTimeline = timeline.map(event => {
+    if (event.type === 'entry') {
+      const plain = typeof event.toObject === 'function' ? event.toObject() : { ...event };
+      return {
+        ...plain,
+        amount: expectedEntryAmount
+      };
+    }
+    return typeof event.toObject === 'function' ? event.toObject() : event;
+  });
+
   let lastRenewalDate = patient.lastRenewalDate || null;
   if (!lastRenewalDate && renewalEvents.length > 0) {
     lastRenewalDate = renewalEvents[renewalEvents.length - 1].date;
@@ -76,7 +92,7 @@ const formatPatientWithFinancials = async (patient) => {
     notes: patient.notes || '',
     status: statusAr,
     statusEn: patient.status,
-    timeline,
+    timeline: normalizedTimeline,
     payments: payments.map(p => ({
       id: p._id.toString(),
       _id: p._id.toString(),
@@ -147,8 +163,8 @@ const getPatientById = async (req, res, next) => {
     const payments = await PatientPayment.find({ patientId: patient._id }).sort({ date: -1 });
     const expenses = await PatientExpense.find({ patientId: patient._id }).sort({ date: -1 });
 
-    // Build or ensure timeline events
-    let timeline = patient.timeline || [];
+    // Build or ensure timeline events using normalized timeline
+    let timeline = formatted.timeline || [];
     
     // If no timeline exists (legacy patient), construct baseline events
     if (timeline.length === 0) {
@@ -158,7 +174,7 @@ const getPatientById = async (req, res, next) => {
           type: 'entry',
           title: 'دخول أولي / تسجيل الحجز',
           date: patient.entryDate || patient.createdAt,
-          amount: patient.accommodationAmount || 0,
+          amount: formatted.accommodationAmount || 0,
           periodStart: patient.entryDate,
           periodEnd: patient.exitDate,
           details: patient.notes || 'تسجيل دخول النزيل لأول مرة'
@@ -559,6 +575,41 @@ const updatePatient = async (req, res, next) => {
       }
     }
 
+    // Keep entry event in timeline synchronized with accommodationAmount, entryDate, and exitDate
+    if (!patient.timeline) {
+      patient.timeline = [];
+    }
+    const renewalSum = patient.timeline
+      .filter(e => e.type === 'renewal')
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const newEntryStay = renewalSum > 0
+      ? Math.max(0, Number(patient.accommodationAmount || 0) - renewalSum)
+      : Number(patient.accommodationAmount || 0);
+
+    const entryEventIndex = patient.timeline.findIndex(e => e.type === 'entry');
+    if (entryEventIndex !== -1) {
+      patient.timeline[entryEventIndex].amount = newEntryStay;
+      if (patient.entryDate) {
+        patient.timeline[entryEventIndex].date = patient.entryDate;
+        patient.timeline[entryEventIndex].periodStart = patient.entryDate;
+      }
+      if (patient.exitDate !== undefined) {
+        patient.timeline[entryEventIndex].periodEnd = patient.exitDate;
+      }
+    } else {
+      patient.timeline.unshift({
+        type: 'entry',
+        title: 'دخول أولي / تسجيل الحجز',
+        date: patient.entryDate || patient.createdAt || new Date(),
+        amount: newEntryStay,
+        periodStart: patient.entryDate || patient.createdAt || new Date(),
+        periodEnd: patient.exitDate,
+        details: patient.notes || 'تسجيل دخول النزيل لأول مرة بالفرع',
+        createdBy: req.user._id
+      });
+    }
+
+    patient.markModified('timeline');
     await patient.save();
 
     await logAudit({
@@ -571,7 +622,7 @@ const updatePatient = async (req, res, next) => {
     });
 
     const formatted = await formatPatientWithFinancials(patient);
-    res.json({ success: true, message: 'تم تعديل بيانات النزيل بنجاح', data: { ...formatted, timeline: patient.timeline } });
+    res.json({ success: true, message: 'تم تعديل بيانات النزيل بنجاح', data: formatted });
   } catch (error) {
     console.error('Error in updatePatient:', error);
     next(error);

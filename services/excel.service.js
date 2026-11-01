@@ -89,8 +89,10 @@ function buildMonthPatientRows(patients = [], targetMonth, targetYear) {
     const hasRenewals = renewalEvents.length > 0 || hasExternalRenewal;
 
     let entryStay = 0;
-    if (entryEvent && entryEvent.amount) {
-      entryStay = Number(entryEvent.amount);
+    if (!hasRenewals) {
+      entryStay = (patient.accommodationAmount !== undefined || patient.stayValue !== undefined)
+        ? pStay
+        : Number(entryEvent?.amount || 0);
     } else if (sumRenewals > 0) {
       entryStay = Math.max(0, pStay - sumRenewals);
     } else if (hasExternalRenewal) {
@@ -1110,7 +1112,7 @@ function buildSummarySheet(workbook, { totalRevenue, totalExpenses, previousSett
 
   sheet.getCell(3, 3).value = 'الايرادات';
   sheet.getCell(3, 4).value = 'المصاريف';
-  sheet.getCell(3, 5).value = 'تصفية الشهر السابق';
+  sheet.getCell(3, 5).value = 'صافي الشهر السابق';
   sheet.getRow(3).height = 32;
 
   sheet.getCell(3, 3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.softPeach } };
@@ -1174,8 +1176,16 @@ function buildSummarySheet(workbook, { totalRevenue, totalExpenses, previousSett
     cell.alignment = { horizontal: 'center', vertical: 'middle' };
   });
 
+  let prevMonth = Number(month) - 1;
+  let prevYear = Number(year);
+  if (prevMonth === 0) {
+    prevMonth = 12;
+    prevYear -= 1;
+  }
+  const prevMonthName = getArabicMonthName(prevMonth);
+
   sheet.getCell(4, 7).value = `01/${String(month === 'all' || month === 'ALL' ? 10 : month).padStart(2, '0')}/${year}`;
-  sheet.getCell(4, 8).value = 'تسوية ورصيد الشهر السابق';
+  sheet.getCell(4, 8).value = (month === 'all' || month === 'ALL') ? 'تسوية ورصيد سنوي' : `صافي إيرادات شهر ${prevMonthName} ${prevYear}`;
   sheet.getCell(4, 9).value = previousSettlement || 0;
   [7, 8, 9].forEach(c => {
     const cell = sheet.getCell(4, c);

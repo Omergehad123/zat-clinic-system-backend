@@ -92,6 +92,8 @@ const buildReportData = async (branchFilter, month, year) => {
     return { start, end };
   };
 
+  let currentMonthStay = 0;
+  let previousMonthNet = 0;
   let totalIncome = 0;
   let totalExpenses = 0;
   let netIncome = 0;
@@ -99,6 +101,57 @@ const buildReportData = async (branchFilter, month, year) => {
   let activeAdvances = [];
   let activePatientExpenses = 0;
   let activeDirectOtherSum = 0;
+
+  // Helper to calculate total stay revenue for a specific monthKey (YYYY-MM)
+  const calculateStayForMonth = (patients, targetKey) => {
+    let stay = 0;
+    patients.forEach(patient => {
+      const entryKey = formatDateToKey(patient.entryDate || patient.createdAt);
+      const entryEvent = Array.isArray(patient.timeline) ? patient.timeline.find(e => e.type === 'entry') : null;
+      const renewalEvents = Array.isArray(patient.timeline) ? patient.timeline.filter(e => e.type === 'renewal') : [];
+      const sumRenewals = renewalEvents.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      
+      const pStay = Number(patient.accommodationAmount ?? patient.stayValue ?? 0);
+      const lastRenKeyCheck = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
+      const hasExternalRenewal = lastRenKeyCheck && lastRenKeyCheck !== entryKey;
+      const hasRenewals = renewalEvents.length > 0 || hasExternalRenewal;
+
+      let entryStay = 0;
+      if (!hasRenewals) {
+        entryStay = (patient.accommodationAmount !== undefined || patient.stayValue !== undefined) ? pStay : Number(entryEvent?.amount || 0);
+      } else if (sumRenewals > 0) {
+        entryStay = Math.max(0, pStay - sumRenewals);
+      } else {
+        entryStay = pStay;
+      }
+
+      if (entryKey === targetKey) {
+        stay += entryStay;
+      }
+
+      const seenRenewalMonths = new Set();
+      if (Array.isArray(patient.timeline)) {
+        renewalEvents.forEach((renEvent) => {
+          const renKey = formatDateToKey(renEvent.date);
+          if (renKey && !seenRenewalMonths.has(renKey)) {
+            seenRenewalMonths.add(renKey);
+            if (renKey === targetKey) {
+              stay += Number(renEvent.amount || 0);
+            }
+          }
+        });
+      }
+
+      if (lastRenKeyCheck && !seenRenewalMonths.has(lastRenKeyCheck)) {
+        seenRenewalMonths.add(lastRenKeyCheck);
+        if (lastRenKeyCheck === targetKey) {
+          const fallbackStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - entryStay);
+          stay += fallbackStay;
+        }
+      }
+    });
+    return stay;
+  };
 
   if (isAllMonths) {
     // 1. All Months aggregation
@@ -110,13 +163,18 @@ const buildReportData = async (branchFilter, month, year) => {
       const renewalEvents = Array.isArray(patient.timeline) ? patient.timeline.filter(e => e.type === 'renewal') : [];
       const sumRenewals = renewalEvents.reduce((s, r) => s + (Number(r.amount) || 0), 0);
       
+      const lastRenKey = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
+      const hasExternalRenewal = lastRenKey && lastRenKey !== formatDateToKey(patient.entryDate || patient.createdAt);
+      const hasRenewals = renewalEvents.length > 0 || hasExternalRenewal;
+      const pStay = Number(patient.accommodationAmount ?? patient.stayValue ?? 0);
+
       let entryStay = 0;
-      if (entryEvent && entryEvent.amount) {
-        entryStay = Number(entryEvent.amount);
+      if (!hasRenewals) {
+        entryStay = (patient.accommodationAmount !== undefined || patient.stayValue !== undefined) ? pStay : Number(entryEvent?.amount || 0);
       } else if (sumRenewals > 0) {
-        entryStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - sumRenewals);
+        entryStay = Math.max(0, pStay - sumRenewals);
       } else {
-        entryStay = Number(patient.accommodationAmount ?? patient.stayValue ?? 0);
+        entryStay = pStay;
       }
       allStaySum += entryStay;
 
@@ -131,7 +189,6 @@ const buildReportData = async (branchFilter, month, year) => {
         });
       }
 
-      const lastRenKey = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
       if (lastRenKey && !seenRenewalMonths.has(lastRenKey)) {
         seenRenewalMonths.add(lastRenKey);
         const fallbackStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - entryStay);
@@ -154,6 +211,8 @@ const buildReportData = async (branchFilter, month, year) => {
       }
     });
 
+    currentMonthStay = allStaySum;
+    previousMonthNet = 0;
     totalIncome = allStaySum;
     totalExpenses = totalInvoicesSum + totalAdvancesSum + allPatientExpSum + allDirectOtherSum;
     netIncome = totalIncome - totalExpenses;
@@ -163,103 +222,129 @@ const buildReportData = async (branchFilter, month, year) => {
     activePatientExpenses = allPatientExpSum;
     activeDirectOtherSum = allDirectOtherSum;
   } else {
-    // 2. Specific Single Month calculations
-    const monthKey = `${targetY}-${String(targetM).padStart(2, '0')}`;
-    const { start, end } = getMonthDateRange(targetY, targetM);
+    // Helper to calculate full financials for any given month/year
+    const calcMonthFin = (m, y) => {
+      const mKey = `${y}-${String(m).padStart(2, '0')}`;
+      const { start, end } = getMonthDateRange(y, m);
+      const stay = calculateStayForMonth(allPatients, mKey);
 
-    // Stay Value & Patient Expenses for this month's drawer
-    let monthStay = 0;
-    let monthPatientExpenses = 0;
-
-    allPatients.forEach(patient => {
-      const entryKey = formatDateToKey(patient.entryDate || patient.createdAt);
-      const entryEvent = Array.isArray(patient.timeline) ? patient.timeline.find(e => e.type === 'entry') : null;
-      const renewalEvents = Array.isArray(patient.timeline) ? patient.timeline.filter(e => e.type === 'renewal') : [];
-      const sumRenewals = renewalEvents.reduce((s, r) => s + (Number(r.amount) || 0), 0);
-      
-      let entryStay = 0;
-      if (entryEvent && entryEvent.amount) {
-        entryStay = Number(entryEvent.amount);
-      } else if (sumRenewals > 0) {
-        entryStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - sumRenewals);
-      } else {
-        entryStay = Number(patient.accommodationAmount ?? patient.stayValue ?? 0);
-      }
-
-      if (entryKey === monthKey) {
-        monthStay += entryStay;
-      }
-
-      const seenRenewalMonths = new Set();
-      if (Array.isArray(patient.timeline)) {
-        renewalEvents.forEach((renEvent) => {
+      let patExp = 0;
+      allPatients.forEach(patient => {
+        const entryKey = formatDateToKey(patient.entryDate || patient.createdAt);
+        const lastRenKey = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
+        const renewalEvents = Array.isArray(patient.timeline) ? patient.timeline.filter(e => e.type === 'renewal') : [];
+        const seenRenewalMonths = new Set();
+        renewalEvents.forEach(renEvent => {
           const renKey = formatDateToKey(renEvent.date);
-          if (renKey && !seenRenewalMonths.has(renKey)) {
-            seenRenewalMonths.add(renKey);
-            if (renKey === monthKey) {
-              monthStay += Number(renEvent.amount || 0);
+          if (renKey) seenRenewalMonths.add(renKey);
+        });
+
+        const matchesEntry = entryKey === mKey;
+        const matchesRenewal = seenRenewalMonths.has(mKey) || lastRenKey === mKey;
+        if (matchesEntry || matchesRenewal) {
+          patExp += Number(patient.totalExpenses ?? patient.expensesTotal ?? 0);
+        }
+      });
+
+      const mInvoices = allInvoices.filter(inv => {
+        if (!inv.date) return false;
+        const d = new Date(inv.date);
+        return d >= start && d <= end;
+      });
+      const invSum = mInvoices.reduce((s, inv) => s + Number(inv.totalAmount || 0), 0);
+
+      const mAdvances = allAdvances.filter(adv => {
+        if (!adv.date) return false;
+        const d = new Date(adv.date);
+        return d >= start && d <= end;
+      });
+      const advSum = mAdvances.reduce((s, adv) => s + Number(adv.amount || 0), 0);
+
+      let directOther = 0;
+      allTransactions.forEach(t => {
+        if (t.type === 'expense' && t.date) {
+          const d = new Date(t.date);
+          if (d >= start && d <= end) {
+            const cat = t.category || '';
+            if (cat !== 'Employee Advances' && cat !== 'PatientExpense' && !cat.includes('سلف') && !cat.includes('مصاريف') && !t.invoiceId && !t.employeeId && !t.patientId) {
+              directOther += Number(t.amount || 0);
             }
           }
+        }
+      });
+
+      const totalExp = invSum + advSum + patExp + directOther;
+      return {
+        stay,
+        expenses: totalExp,
+        net: stay - totalExp,
+        invoices: mInvoices,
+        advances: mAdvances,
+        patExp,
+        directOther
+      };
+    };
+
+    // 2. Specific Single Month calculations with rolling cumulative net
+    // Collect all month keys to find earliest recorded month
+    const allKeys = new Set();
+    allPatients.forEach(p => {
+      const ek = formatDateToKey(p.entryDate || p.createdAt);
+      if (ek) allKeys.add(ek);
+      const lrk = formatDateToKey(p.lastRenewalDate || p.renewalDate);
+      if (lrk) allKeys.add(lrk);
+      if (Array.isArray(p.timeline)) {
+        p.timeline.forEach(e => {
+          const dk = formatDateToKey(e.date);
+          if (dk) allKeys.add(dk);
         });
       }
+    });
+    allInvoices.forEach(i => { const k = formatDateToKey(i.date); if (k) allKeys.add(k); });
+    allAdvances.forEach(a => { const k = formatDateToKey(a.date); if (k) allKeys.add(k); });
+    allTransactions.forEach(t => { const k = formatDateToKey(t.date); if (k) allKeys.add(k); });
 
-      const lastRenKey = formatDateToKey(patient.lastRenewalDate || patient.renewalDate);
-      if (lastRenKey && !seenRenewalMonths.has(lastRenKey)) {
-        seenRenewalMonths.add(lastRenKey);
-        if (lastRenKey === monthKey) {
-          const fallbackStay = Math.max(0, (Number(patient.accommodationAmount ?? patient.stayValue ?? 0)) - entryStay);
-          monthStay += fallbackStay;
-        }
+    const validKeys = [...allKeys].filter(k => k && /^\d{4}-\d{2}$/.test(k)).sort();
+    const startKey = (validKeys[0] && validKeys[0] < monthKey) ? validKeys[0] : monthKey;
+
+    const getConsecutiveMonthKeys = (sKey, eKey) => {
+      if (!sKey || !eKey) return [];
+      if (sKey > eKey) return [eKey];
+      const keys = [];
+      let [curY, curM] = sKey.split('-').map(Number);
+      const [endY, endM] = eKey.split('-').map(Number);
+      while (curY < endY || (curY === endY && curM <= endM)) {
+        keys.push(`${curY}-${String(curM).padStart(2, '0')}`);
+        curM++;
+        if (curM > 12) { curM = 1; curY++; }
       }
+      return keys;
+    };
 
-      const matchesEntry = entryKey === monthKey;
-      const matchesRenewal = seenRenewalMonths.has(monthKey) || lastRenKey === monthKey;
-      if (matchesEntry || matchesRenewal) {
-        const pExp = Number(patient.totalExpenses ?? patient.expensesTotal ?? 0);
-        monthPatientExpenses += pExp;
-      }
-    });
+    const consecutiveKeys = getConsecutiveMonthKeys(startKey, monthKey);
+    let runningNet = 0;
 
-    // Invoices in this month
-    const mInvoices = allInvoices.filter(inv => {
-      if (!inv.date) return false;
-      const d = new Date(inv.date);
-      return d >= start && d <= end;
-    });
-    const invoicesSum = mInvoices.reduce((s, inv) => s + Number(inv.totalAmount || 0), 0);
+    consecutiveKeys.forEach(k => {
+      const [ky, km] = k.split('-').map(Number);
+      const fin = calcMonthFin(km, ky);
+      const prevNet = runningNet;
+      const effRev = fin.stay + prevNet;
+      const finNet = effRev - fin.expenses;
+      runningNet = finNet;
 
-    // Advances in this month
-    const mAdvances = allAdvances.filter(adv => {
-      if (!adv.date) return false;
-      const d = new Date(adv.date);
-      return d >= start && d <= end;
-    });
-    const advancesSum = mAdvances.reduce((s, adv) => s + Number(adv.amount || 0), 0);
+      if (k === monthKey) {
+        currentMonthStay = fin.stay;
+        previousMonthNet = prevNet;
+        totalIncome = effRev;
+        totalExpenses = fin.expenses;
+        netIncome = finNet;
 
-    // Other direct expenses in this month
-    const mTransactions = allTransactions.filter(t => {
-      if (!t.date) return false;
-      const d = new Date(t.date);
-      return d >= start && d <= end;
-    });
-    let directOtherSum = 0;
-    mTransactions.forEach(t => {
-      if (t.type === 'expense') {
-        const cat = t.category || '';
-        if (cat !== 'Employee Advances' && cat !== 'PatientExpense' && !cat.includes('سلف') && !cat.includes('مصاريف') && !t.invoiceId && !t.employeeId && !t.patientId) {
-          directOtherSum += Number(t.amount || 0);
-        }
+        activeInvoices = fin.invoices;
+        activeAdvances = fin.advances;
+        activePatientExpenses = fin.patExp;
+        activeDirectOtherSum = fin.directOther;
       }
     });
-
-    totalIncome = monthStay;
-    totalExpenses = invoicesSum + advancesSum + monthPatientExpenses + directOtherSum;
-    netIncome = totalIncome - totalExpenses;
-
-    activeInvoices = mInvoices;
-    activeAdvances = mAdvances;
-    activePatientExpenses = monthPatientExpenses;
-    activeDirectOtherSum = directOtherSum;
   }
 
   // Patient Metrics
@@ -347,6 +432,8 @@ const buildReportData = async (branchFilter, month, year) => {
     month: isAllMonths ? 'ALL' : targetM,
     year: targetY,
     summary: {
+      currentMonthStay,
+      previousMonthNet,
       totalIncome,
       totalExpenses,
       netIncome,
@@ -444,22 +531,7 @@ const exportExcel = async (req, res, next) => {
     }
 
     const reportData = await buildReportData(req.branchFilter, month, year);
-
-    let previousSettlement = 0;
-    if (month !== 'all' && month !== 'ALL') {
-      let prevM = Number(month) - 1;
-      let prevY = Number(year);
-      if (prevM === 0) {
-        prevM = 12;
-        prevY -= 1;
-      }
-      try {
-        const prevReportData = await buildReportData(req.branchFilter, prevM, prevY);
-        previousSettlement = prevReportData?.summary?.netIncome || 0;
-      } catch (e) {
-        console.error('Error fetching prev month for settlement:', e);
-      }
-    }
+    const previousSettlement = Number(reportData?.summary?.previousMonthNet || 0);
 
     let branchComparison = [];
     if (req.user.role === 'super_admin') {
