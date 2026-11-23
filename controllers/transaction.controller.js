@@ -1,85 +1,9 @@
 const Transaction = require('../models/Transaction');
-const PatientPayment = require('../models/PatientPayment');
-const Patient = require('../models/Patient');
-const EmployeeAdvance = require('../models/EmployeeAdvance');
-const Employee = require('../models/Employee');
-const Invoice = require('../models/Invoice');
-const Expense = require('../models/Expense');
 
 // GET /api/transactions
 const getTransactions = async (req, res, next) => {
   try {
     const branchFilter = { ...req.branchFilter };
-
-    // Auto-sync any existing PatientPayments into Transactions if missing
-    try {
-      const payments = await PatientPayment.find(branchFilter);
-      for (const p of payments) {
-        const existingTx = await Transaction.findOne({
-          patientId: p.patientId,
-          amount: p.amount,
-          date: p.date
-        });
-        if (!existingTx) {
-          const patient = await Patient.findById(p.patientId);
-          await Transaction.create({
-            type: 'income',
-            amount: p.amount,
-            date: p.date || Date.now(),
-            category: 'Accommodation',
-            description: `دفعة إقامة - ${patient ? patient.name : 'نزيل'} (${p.paymentMethod || 'كاش'})`,
-            branchId: p.branchId,
-            patientId: p.patientId,
-            createdBy: p.createdBy
-          });
-        }
-      }
-
-      // Auto-sync Advances
-      const advances = await EmployeeAdvance.find(branchFilter);
-      for (const a of advances) {
-        const existingTx = await Transaction.findOne({
-          employeeId: a.employeeId,
-          amount: a.amount,
-          date: a.date
-        });
-        if (!existingTx) {
-          const emp = await Employee.findById(a.employeeId);
-          await Transaction.create({
-            type: 'expense',
-            amount: a.amount,
-            date: a.date || Date.now(),
-            category: 'Employee Advances',
-            description: `سلفة موظف - ${emp ? emp.name : 'موظف'}`,
-            branchId: a.branchId,
-            employeeId: a.employeeId,
-            createdBy: a.createdBy
-          });
-        }
-      }
-
-      // Auto-sync Invoices
-      const invoices = await Invoice.find(branchFilter);
-      for (const inv of invoices) {
-        const existingTx = await Transaction.findOne({
-          invoiceId: inv._id
-        });
-        if (!existingTx) {
-          await Transaction.create({
-            type: 'expense',
-            amount: inv.totalAmount,
-            date: inv.date || Date.now(),
-            category: inv.category || 'Supplies',
-            description: `فاتورة مصروفات رقم #${inv.invoiceNumber} (${inv.category || 'مستلزمات'})`,
-            branchId: inv.branchId,
-            invoiceId: inv._id,
-            createdBy: inv.createdBy
-          });
-        }
-      }
-    } catch (syncErr) {
-      console.error('Error auto-syncing transactions:', syncErr);
-    }
 
     const filter = { ...req.branchFilter };
 

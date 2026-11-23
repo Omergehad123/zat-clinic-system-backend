@@ -43,13 +43,12 @@ const removePaymentTimelineEvent = async (patient, payment) => {
 };
 
 // Helper to attach calculated financial totals to patient object with UI compatibility aliases
-const formatPatientWithFinancials = async (patient) => {
+const formatPatientWithFinancials = async (patient, preloaded) => {
   const patientId = patient._id;
-
-  const payments = await PatientPayment.find({ patientId });
+  const payments = preloaded?.payments || await PatientPayment.find({ patientId });
   const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
 
-  const expenses = await PatientExpense.find({ patientId });
+  const expenses = preloaded?.expenses || await PatientExpense.find({ patientId });
   const totalExpenses = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 
   const accommodationAmount = Number(patient.accommodationAmount || 0);
@@ -180,8 +179,31 @@ const getPatients = async (req, res, next) => {
 
     const patients = await Patient.find(filter).populate('branchId', 'name').sort({ createdAt: -1 });
 
+    const patientIds = patients.map(p => p._id);
+    const [allPayments, allExpenses] = await Promise.all([
+      PatientPayment.find({ patientId: { $in: patientIds } }),
+      PatientExpense.find({ patientId: { $in: patientIds } })
+    ]);
+
+    const paymentsByPatient = new Map();
+    allPayments.forEach(payment => {
+      const key = payment.patientId.toString();
+      if (!paymentsByPatient.has(key)) paymentsByPatient.set(key, []);
+      paymentsByPatient.get(key).push(payment);
+    });
+
+    const expensesByPatient = new Map();
+    allExpenses.forEach(expense => {
+      const key = expense.patientId.toString();
+      if (!expensesByPatient.has(key)) expensesByPatient.set(key, []);
+      expensesByPatient.get(key).push(expense);
+    });
+
     const formattedList = await Promise.all(
-      patients.map(p => formatPatientWithFinancials(p))
+      patients.map(p => formatPatientWithFinancials(p, {
+        payments: paymentsByPatient.get(p._id.toString()) || [],
+        expenses: expensesByPatient.get(p._id.toString()) || []
+      }))
     );
 
     res.json({ success: true, count: formattedList.length, data: formattedList });
@@ -669,18 +691,32 @@ const deletePatientRenewal = async (req, res, next) => {
       await PatientExpense.findByIdAndDelete(expense._id);
     }
 
-    if (!laterRenewals.some(event => event.renewalMode === 'replace')) {
-      const accommodationImpact = previousState
-        ? Number(renewalEvent.accommodationAfter ?? renewalEvent.amount) - Number(previousState.accommodationAmount || 0)
-        : Number(renewalEvent.amount || 0);
-      patient.accommodationAmount = Math.max(
-        0,
-        Number(patient.accommodationAmount || 0) - accommodationImpact
-      );
-    }
-
     patient.timeline.pull(renewalEvent._id);
     const remainingRenewals = patient.timeline.filter(event => event.type === 'renewal');
+    if (remainingRenewals.length === 0) {
+      patient.accommodationAmount = Math.max(
+        0,
+        Number(previousState?.accommodationAmount ?? patient.accommodationAmount ?? 0)
+      );
+    } else {
+      const entryEvent = patient.timeline.find(event => event.type === 'entry');
+      const firstRemaining = remainingRenewals[0];
+      let replayAmount = Number(
+        entryEvent?.amount ??
+        firstRemaining.previousState?.accommodationAmount ??
+        previousState?.accommodationAmount ??
+        patient.accommodationAmount ??
+        0
+      );
+      remainingRenewals.forEach(event => {
+        const renewValue = Number(event.amount || 0);
+        replayAmount = event.renewalMode === 'replace'
+          ? renewValue
+          : replayAmount + renewValue;
+      });
+      patient.accommodationAmount = Math.max(0, replayAmount);
+    }
+
     patient.renewalsCount = Math.max(0, Number(patient.renewalsCount || 0) - 1);
     patient.lastRenewalDate = remainingRenewals.length
       ? remainingRenewals[remainingRenewals.length - 1].date
