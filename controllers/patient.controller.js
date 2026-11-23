@@ -102,6 +102,19 @@ const formatPatientWithFinancials = async (patient, preloaded) => {
     }
   }
   const renewalsCount = patient.renewalsCount || renewalEvents.length || (lastRenewalDate ? 1 : 0);
+  const totalRenewalValue = renewalEvents.reduce(
+    (sum, event) => sum + Number(event.amount || 0),
+    0
+  );
+  const firstRenewalPreviousAmount = renewalEvents.length > 0
+    ? Number(renewalEvents[0]?.previousState?.accommodationAmount)
+    : NaN;
+  const exactEntryValue = renewalEvents.length > 0
+    ? (Number.isFinite(firstRenewalPreviousAmount)
+        ? firstRenewalPreviousAmount
+        : Math.max(0, accommodationAmount - totalRenewalValue))
+    : accommodationAmount;
+  const totalAccommodationValue = exactEntryValue + totalRenewalValue;
 
   return {
     id: patient._id.toString(),
@@ -118,6 +131,7 @@ const formatPatientWithFinancials = async (patient, preloaded) => {
     
     // Canonical backend fields
     accommodationAmount,
+    totalAccommodationValue,
     paidAmount: totalPaid,
     remainingAmount: remaining,
     totalExpenses,
