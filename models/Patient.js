@@ -15,6 +15,12 @@ const timelineEventSchema = new mongoose.Schema(
     details: { type: String, default: '' },
     periodStart: { type: Date },
     periodEnd: { type: Date },
+    relatedPaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'PatientPayment' },
+    relatedExpenseId: { type: mongoose.Schema.Types.ObjectId, ref: 'PatientExpense' },
+    renewalMode: { type: String, enum: ['add', 'replace'] },
+    accommodationAfter: { type: Number },
+    previousState: { type: mongoose.Schema.Types.Mixed },
+    noteEntry: { type: String, default: '' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
   },
   { timestamps: true }

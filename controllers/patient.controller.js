@@ -4,6 +4,44 @@ const PatientExpense = require('../models/PatientExpense');
 const Transaction = require('../models/Transaction');
 const { logAudit } = require('../utils/audit.utils');
 
+const deleteLinkedTransaction = async ({ record, patientId, amount, date, type, category }) => {
+  if (record?.transactionId) {
+    await Transaction.findByIdAndDelete(record.transactionId);
+    return;
+  }
+
+  const candidates = await Transaction.find({ patientId, type, category, amount });
+  const targetTime = new Date(date).getTime();
+  const matchingTransaction = candidates.reduce((best, transaction) => {
+    const difference = Math.abs(new Date(transaction.date).getTime() - targetTime);
+    return !best || difference < best.difference ? { transaction, difference } : best;
+  }, null);
+
+  if (matchingTransaction && matchingTransaction.difference <= 24 * 60 * 60 * 1000) {
+    await Transaction.findByIdAndDelete(matchingTransaction.transaction._id);
+  }
+};
+
+const removePaymentTimelineEvent = async (patient, payment) => {
+  if (!Array.isArray(patient.timeline)) return;
+
+  let event = payment.timelineEventId
+    ? patient.timeline.id(payment.timelineEventId)
+    : patient.timeline.find(item => item.relatedPaymentId?.toString() === payment._id.toString());
+
+  if (!event && /الدفعة الأولى|تجديد الإقامة/.test(payment.notes || '')) {
+    event = patient.timeline.find(item =>
+      item.type === 'payment' &&
+      Number(item.amount) === Number(payment.amount) &&
+      Math.abs(new Date(item.date).getTime() - new Date(payment.date).getTime()) <= 24 * 60 * 60 * 1000
+    );
+  }
+
+  if (event) {
+    patient.timeline.pull(event._id);
+  }
+};
+
 // Helper to attach calculated financial totals to patient object with UI compatibility aliases
 const formatPatientWithFinancials = async (patient) => {
   const patientId = patient._id;
@@ -34,9 +72,14 @@ const formatPatientWithFinancials = async (patient) => {
   const timeline = patient.timeline || [];
   const renewalEvents = timeline.filter(e => e.type === 'renewal');
   const sumRenewals = renewalEvents.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-  const expectedEntryAmount = renewalEvents.length > 0
-    ? Math.max(0, accommodationAmount - sumRenewals)
-    : accommodationAmount;
+  const firstTrackedRenewalIndex = renewalEvents.findIndex(event => event.previousState);
+  const expectedEntryAmount = firstTrackedRenewalIndex >= 0
+    ? Math.max(
+        0,
+        Number(renewalEvents[firstTrackedRenewalIndex].previousState.accommodationAmount || 0) -
+          renewalEvents.slice(0, firstTrackedRenewalIndex).reduce((sum, event) => sum + (Number(event.amount) || 0), 0)
+      )
+    : (renewalEvents.length > 0 ? Math.max(0, accommodationAmount - sumRenewals) : accommodationAmount);
 
   const normalizedTimeline = timeline.map(event => {
     if (event.type === 'entry') {
@@ -270,7 +313,7 @@ const createPatient = async (req, res, next) => {
         createdBy: req.user._id
       });
 
-      await Transaction.create({
+      const transaction = await Transaction.create({
         type: 'income',
         amount: initialPayment,
         date: payment.date,
@@ -280,6 +323,7 @@ const createPatient = async (req, res, next) => {
         patientId: patient._id,
         createdBy: req.user._id
       });
+      payment.transactionId = transaction._id;
 
       patient.timeline.push({
         type: 'payment',
@@ -287,15 +331,18 @@ const createPatient = async (req, res, next) => {
         date: effectiveEntryDate,
         amount: initialPayment,
         details: 'طريقة الدفع: كاش',
+        relatedPaymentId: payment._id,
         createdBy: req.user._id
       });
+      payment.timelineEventId = patient.timeline[patient.timeline.length - 1]._id;
+      await payment.save();
       await patient.save();
     }
 
     // Create initial patient expense record if initialExpenses was provided
     const finalInitialExpenses = Number(initialExpenses || 0);
     if (finalInitialExpenses > 0) {
-      await PatientExpense.create({
+      const expense = await PatientExpense.create({
         patientId: patient._id,
         branchId: targetBranchId,
         description: 'مصاريف ابتدائية عند التسجيل',
@@ -306,7 +353,7 @@ const createPatient = async (req, res, next) => {
         createdBy: req.user._id
       });
 
-      await Transaction.create({
+      const transaction = await Transaction.create({
         type: 'expense',
         amount: finalInitialExpenses,
         date: effectiveEntryDate,
@@ -316,6 +363,7 @@ const createPatient = async (req, res, next) => {
         patientId: patient._id,
         createdBy: req.user._id
       });
+      expense.transactionId = transaction._id;
 
       patient.timeline.push({
         type: 'expense',
@@ -323,8 +371,11 @@ const createPatient = async (req, res, next) => {
         date: effectiveEntryDate,
         amount: finalInitialExpenses,
         details: 'مصاريف مسجلة مسبقاً عند إنشاء ملف النزيل',
+        relatedExpenseId: expense._id,
         createdBy: req.user._id
       });
+      expense.timelineEventId = patient.timeline[patient.timeline.length - 1]._id;
+      await expense.save();
       await patient.save();
     }
 
@@ -375,8 +426,18 @@ const renewPatient = async (req, res, next) => {
     const effectiveExitDate = (expectedExitDate && String(expectedExitDate).trim() !== '') ? new Date(expectedExitDate) : null;
     const initialPayment = Number(firstPayment || 0);
     const expenseAmount = Number(initialExpenses || expenses || 0);
+    const renewalMode = mode === 'replace' ? 'replace' : 'add';
+    const previousState = {
+      accommodationAmount: Number(patient.accommodationAmount || 0),
+      exitDate: patient.exitDate,
+      lastRenewalDate: patient.lastRenewalDate,
+      renewalsCount: Number(patient.renewalsCount || 0),
+      status: patient.status,
+      expenseDeposit: Number(patient.expenseDeposit || 0),
+      notes: patient.notes || ''
+    };
 
-    if (mode === 'replace') {
+    if (renewalMode === 'replace') {
       patient.accommodationAmount = renewValue;
     } else {
       patient.accommodationAmount = Number(patient.accommodationAmount || 0) + renewValue;
@@ -390,11 +451,13 @@ const renewPatient = async (req, res, next) => {
       patient.expenseDeposit = Number(expenseDeposit);
     }
     
-    if (notes) {
-      const dateStr = effectiveRenewDate.toISOString().split('T')[0];
+    const noteEntry = notes
+      ? `[تجديد إقامة بتاريخ ${effectiveRenewDate.toISOString().split('T')[0]}]: ${notes}`
+      : '';
+    if (noteEntry) {
       patient.notes = patient.notes 
-        ? `${patient.notes}\n[تجديد إقامة بتاريخ ${dateStr}]: ${notes}`
-        : `[تجديد إقامة بتاريخ ${dateStr}]: ${notes}`;
+        ? `${patient.notes}\n${noteEntry}`
+        : noteEntry;
     }
 
     if (!patient.timeline) {
@@ -412,8 +475,13 @@ const renewPatient = async (req, res, next) => {
       firstPayment: initialPayment,
       initialExpenses: expenseAmount,
       details: notes || `تم تجديد الإقامة بقيمة ${renewValue} جنيه`,
+      renewalMode,
+      accommodationAfter: patient.accommodationAmount,
+      previousState,
+      noteEntry,
       createdBy: req.user._id
     });
+    const renewalEvent = patient.timeline[patient.timeline.length - 1];
 
     await patient.save();
 
@@ -429,7 +497,7 @@ const renewPatient = async (req, res, next) => {
         createdBy: req.user._id
       });
 
-      await Transaction.create({
+      const transaction = await Transaction.create({
         type: 'income',
         amount: initialPayment,
         date: payment.date,
@@ -439,6 +507,7 @@ const renewPatient = async (req, res, next) => {
         patientId: patient._id,
         createdBy: req.user._id
       });
+      payment.transactionId = transaction._id;
 
       patient.timeline.push({
         type: 'payment',
@@ -446,14 +515,18 @@ const renewPatient = async (req, res, next) => {
         date: effectiveRenewDate,
         amount: initialPayment,
         details: `طريقة الدفع: ${paymentMethod || 'كاش'}`,
+        relatedPaymentId: payment._id,
         createdBy: req.user._id
       });
+      payment.timelineEventId = patient.timeline[patient.timeline.length - 1]._id;
+      renewalEvent.relatedPaymentId = payment._id;
+      await payment.save();
       await patient.save();
     }
 
     // If initial expenses provided on renewal
     if (expenseAmount > 0) {
-      await PatientExpense.create({
+      const expense = await PatientExpense.create({
         patientId: patient._id,
         branchId: patient.branchId,
         description: 'مصاريف مع تجديد الإقامة',
@@ -464,7 +537,7 @@ const renewPatient = async (req, res, next) => {
         createdBy: req.user._id
       });
 
-      await Transaction.create({
+      const transaction = await Transaction.create({
         type: 'expense',
         amount: expenseAmount,
         date: effectiveRenewDate,
@@ -474,6 +547,7 @@ const renewPatient = async (req, res, next) => {
         patientId: patient._id,
         createdBy: req.user._id
       });
+      expense.transactionId = transaction._id;
 
       patient.timeline.push({
         type: 'expense',
@@ -481,8 +555,12 @@ const renewPatient = async (req, res, next) => {
         date: effectiveRenewDate,
         amount: expenseAmount,
         details: `مصاريف مسجلة عند تجديد الإقامة`,
+        relatedExpenseId: expense._id,
         createdBy: req.user._id
       });
+      expense.timelineEventId = patient.timeline[patient.timeline.length - 1]._id;
+      renewalEvent.relatedExpenseId = expense._id;
+      await expense.save();
       await patient.save();
     }
 
@@ -510,6 +588,139 @@ const renewPatient = async (req, res, next) => {
         ...formatted,
         timeline: patient.timeline
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// DELETE /api/patients/:id/renewals/:renewalId
+const deletePatientRenewal = async (req, res, next) => {
+  try {
+    const patient = await Patient.findById(req.params.id);
+    if (!patient) {
+      return res.status(404).json({ success: false, message: 'النزيل غير موجود' });
+    }
+
+    const renewalEvent = patient.timeline.id(req.params.renewalId);
+    if (!renewalEvent || renewalEvent.type !== 'renewal') {
+      return res.status(404).json({ success: false, message: 'عملية التجديد غير موجودة' });
+    }
+
+    const previousState = renewalEvent.previousState || null;
+    const renewalIndex = patient.timeline.findIndex(event => event._id.toString() === renewalEvent._id.toString());
+    const laterEvents = patient.timeline.slice(renewalIndex + 1);
+    const laterRenewals = laterEvents.filter(event => event.type === 'renewal');
+    const hasLaterStayEvent = laterEvents.some(event => ['renewal', 'discharge'].includes(event.type));
+
+    const payment = renewalEvent.relatedPaymentId
+      ? await PatientPayment.findOne({ _id: renewalEvent.relatedPaymentId, patientId: patient._id })
+      : (Number(renewalEvent.firstPayment) > 0
+          ? await PatientPayment.findOne({
+              patientId: patient._id,
+              amount: Number(renewalEvent.firstPayment),
+              date: renewalEvent.date,
+              notes: { $regex: 'تجديد الإقامة' }
+            })
+          : null);
+    const expense = renewalEvent.relatedExpenseId
+      ? await PatientExpense.findOne({ _id: renewalEvent.relatedExpenseId, patientId: patient._id })
+      : (Number(renewalEvent.initialExpenses) > 0
+          ? await PatientExpense.findOne({
+              patientId: patient._id,
+              amount: Number(renewalEvent.initialExpenses),
+              date: renewalEvent.date,
+              description: 'مصاريف مع تجديد الإقامة'
+            })
+          : null);
+
+    if (payment) {
+      await deleteLinkedTransaction({
+        record: payment,
+        patientId: patient._id,
+        amount: Number(payment.amount),
+        date: payment.date,
+        type: 'income',
+        category: 'Accommodation'
+      });
+      await removePaymentTimelineEvent(patient, payment);
+      await PatientPayment.findByIdAndDelete(payment._id);
+    }
+
+    if (expense) {
+      await deleteLinkedTransaction({
+        record: expense,
+        patientId: patient._id,
+        amount: Number(expense.amount),
+        date: expense.date,
+        type: 'expense',
+        category: 'PatientExpense'
+      });
+      if (expense.timelineEventId) {
+        patient.timeline.pull(expense.timelineEventId);
+      } else if (['مصاريف ابتدائية عند التسجيل', 'مصاريف مع تجديد الإقامة'].includes(expense.description)) {
+        const expenseEvent = patient.timeline.find(event =>
+          event.type === 'expense' &&
+          Number(event.amount) === Number(expense.amount) &&
+          Math.abs(new Date(event.date).getTime() - new Date(expense.date).getTime()) <= 24 * 60 * 60 * 1000
+        );
+        if (expenseEvent) patient.timeline.pull(expenseEvent._id);
+      }
+      await PatientExpense.findByIdAndDelete(expense._id);
+    }
+
+    if (!laterRenewals.some(event => event.renewalMode === 'replace')) {
+      const accommodationImpact = previousState
+        ? Number(renewalEvent.accommodationAfter ?? renewalEvent.amount) - Number(previousState.accommodationAmount || 0)
+        : Number(renewalEvent.amount || 0);
+      patient.accommodationAmount = Math.max(
+        0,
+        Number(patient.accommodationAmount || 0) - accommodationImpact
+      );
+    }
+
+    patient.timeline.pull(renewalEvent._id);
+    const remainingRenewals = patient.timeline.filter(event => event.type === 'renewal');
+    patient.renewalsCount = Math.max(0, Number(patient.renewalsCount || 0) - 1);
+    patient.lastRenewalDate = remainingRenewals.length
+      ? remainingRenewals[remainingRenewals.length - 1].date
+      : (previousState?.lastRenewalDate || null);
+
+    if (!hasLaterStayEvent && previousState) {
+      patient.exitDate = previousState.exitDate || null;
+      patient.status = previousState.status || 'current';
+      patient.expenseDeposit = Number(previousState.expenseDeposit || 0);
+    }
+    if (renewalEvent.noteEntry) {
+      patient.notes = (patient.notes || '')
+        .replace(renewalEvent.noteEntry, '')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+    } else if (!hasLaterStayEvent && previousState) {
+      patient.notes = previousState.notes || '';
+    }
+
+    await patient.save();
+
+    await logAudit({
+      user: req.user,
+      action: 'DELETE_PATIENT_RENEWAL',
+      entity: 'Patient',
+      entityId: patient._id,
+      branchId: patient.branchId,
+      metadata: {
+        patientId: patient._id,
+        patientName: patient.name,
+        renewalDate: renewalEvent.date,
+        amount: renewalEvent.amount,
+        deletedPayment: Number(payment?.amount || 0),
+        deletedExpense: Number(expense?.amount || 0)
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'تم إلغاء التجديد وحذف الدفعات والمصاريف المرتبطة به وتحديث حساب النزيل'
     });
   } catch (error) {
     next(error);
@@ -691,4 +902,4 @@ const deletePatient = async (req, res, next) => {
   }
 };
 
-module.exports = { getPatients, getPatientById, createPatient, renewPatient, updatePatient, deletePatient };
+module.exports = { getPatients, getPatientById, createPatient, renewPatient, deletePatientRenewal, updatePatient, deletePatient };

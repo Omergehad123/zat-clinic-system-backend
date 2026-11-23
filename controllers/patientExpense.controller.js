@@ -1,6 +1,33 @@
 const PatientExpense = require('../models/PatientExpense');
 const Patient = require('../models/Patient');
+const Transaction = require('../models/Transaction');
 const { logAudit } = require('../utils/audit.utils');
+
+const deleteExpenseTransaction = async (expense) => {
+  if (expense.transactionId) {
+    await Transaction.findByIdAndDelete(expense.transactionId);
+    return;
+  }
+
+  if (!['مصاريف ابتدائية عند التسجيل', 'مصاريف مع تجديد الإقامة'].includes(expense.description)) {
+    return;
+  }
+
+  const candidates = await Transaction.find({
+    patientId: expense.patientId,
+    category: 'PatientExpense',
+    type: 'expense',
+    amount: expense.amount
+  });
+  const targetTime = new Date(expense.date).getTime();
+  const match = candidates.reduce((best, transaction) => {
+    const difference = Math.abs(new Date(transaction.date).getTime() - targetTime);
+    return !best || difference < best.difference ? { transaction, difference } : best;
+  }, null);
+  if (match && match.difference <= 24 * 60 * 60 * 1000) {
+    await Transaction.findByIdAndDelete(match.transaction._id);
+  }
+};
 
 // GET /api/patient-expenses
 const getPatientExpenses = async (req, res, next) => {
@@ -94,4 +121,65 @@ const createPatientExpense = async (req, res, next) => {
   }
 };
 
-module.exports = { getPatientExpenses, createPatientExpense };
+// DELETE /api/patient-expenses/:id
+const deletePatientExpense = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'super_admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'غير مصرح: حذف مصاريف النزيل متاح لمدير النظام (Super Admin) فقط'
+      });
+    }
+
+    const expense = await PatientExpense.findById(req.params.id);
+    if (!expense) {
+      return res.status(404).json({ success: false, message: 'مصروف النزيل غير موجود' });
+    }
+
+    const patient = await Patient.findById(expense.patientId);
+    await deleteExpenseTransaction(expense);
+
+    if (patient && Array.isArray(patient.timeline)) {
+      const event = patient.timeline.id(expense.timelineEventId) ||
+        patient.timeline.find(item =>
+          item.type === 'expense' &&
+          item.relatedExpenseId?.toString() === expense._id.toString()
+        );
+      const legacyAutoExpense = ['مصاريف ابتدائية عند التسجيل', 'مصاريف مع تجديد الإقامة'].includes(expense.description);
+      const legacyEvent = !event && legacyAutoExpense
+        ? patient.timeline.find(item =>
+            item.type === 'expense' &&
+            Number(item.amount) === Number(expense.amount) &&
+            Math.abs(new Date(item.date).getTime() - new Date(expense.date).getTime()) <= 24 * 60 * 60 * 1000
+          )
+        : null;
+      if (event || legacyEvent) {
+        patient.timeline.pull((event || legacyEvent)._id);
+        await patient.save();
+      }
+    }
+
+    await PatientExpense.findByIdAndDelete(expense._id);
+
+    await logAudit({
+      user: req.user,
+      action: 'DELETE_PATIENT_EXPENSE',
+      entity: 'PatientExpense',
+      entityId: expense._id,
+      branchId: expense.branchId,
+      metadata: {
+        patientId: expense.patientId,
+        patientName: patient?.name || '',
+        amount: expense.amount,
+        description: expense.description,
+        category: expense.category
+      }
+    });
+
+    res.json({ success: true, message: 'تم حذف مصروف النزيل وتحديث الحسابات' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { getPatientExpenses, createPatientExpense, deletePatientExpense };

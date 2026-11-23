@@ -9,6 +9,8 @@ const patientExpenseSchema = new mongoose.Schema(
     category: { type: String, default: 'Medicine' },
     amount: { type: Number, required: true, min: 0 },
     notes: { type: String, default: '' },
+    transactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' },
+    timelineEventId: { type: mongoose.Schema.Types.ObjectId },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
   },
   { timestamps: true }

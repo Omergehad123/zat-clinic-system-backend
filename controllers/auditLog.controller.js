@@ -18,8 +18,10 @@ const actionLabels = {
   ADD_PAYMENT: 'إضافة دفعة سداد',
   CREATE_PAYMENT: 'إضافة دفعة سداد',
   DELETE_PATIENT_PAYMENT: 'حذف دفعة سداد',
+  DELETE_PATIENT_RENEWAL: 'إلغاء تجديد إقامة',
   ADD_PATIENT_EXPENSE: 'إضافة مصروف نزيل',
   CREATE_PATIENT_EXPENSE: 'إضافة مصروف نزيل',
+  DELETE_PATIENT_EXPENSE: 'حذف مصروف نزيل',
   CREATE_EXPENSE: 'إضافة مصروف',
   UPDATE_EXPENSE: 'تعديل مصروف',
   DELETE_EXPENSE: 'حذف مصروف',
@@ -69,6 +71,12 @@ const buildItemDescription = (action, entity, metadata) => {
     case 'RENEW_PATIENT':
       return m.name || m.patientName || entity;
 
+    case 'DELETE_PATIENT_RENEWAL':
+      return (m.patientName || entity) +
+        (m.amount != null ? ' — إلغاء تجديد ' + Number(m.amount).toLocaleString('ar-EG') + ' ج.م' : '') +
+        (m.deletedPayment ? ' (دفعة محذوفة: ' + Number(m.deletedPayment).toLocaleString('ar-EG') + ' ج.م)' : '') +
+        (m.deletedExpense ? ' (مصروف محذوف: ' + Number(m.deletedExpense).toLocaleString('ar-EG') + ' ج.م)' : '');
+
     case 'ADD_PAYMENT':
     case 'CREATE_PAYMENT':
     case 'DELETE_PATIENT_PAYMENT':
@@ -79,7 +87,10 @@ const buildItemDescription = (action, entity, metadata) => {
 
     case 'ADD_PATIENT_EXPENSE':
     case 'CREATE_PATIENT_EXPENSE':
-      return m.patientName || entity;
+    case 'DELETE_PATIENT_EXPENSE':
+      return (m.patientName || entity) +
+        (m.description ? ' — ' + m.description : '') +
+        (m.amount != null ? ' — ' + Number(m.amount).toLocaleString('ar-EG') + ' ج.م' : '');
 
     case 'CREATE_EXPENSE':
     case 'UPDATE_EXPENSE':

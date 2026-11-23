@@ -65,7 +65,7 @@ const createPatientPayment = async (req, res, next) => {
     });
 
     // Auto-create income transaction for accommodation income
-    await Transaction.create({
+    const transaction = await Transaction.create({
       type: 'income',
       amount: numAmount,
       date: payment.date,
@@ -75,6 +75,8 @@ const createPatientPayment = async (req, res, next) => {
       patientId: patient._id,
       createdBy: req.user._id
     });
+    payment.transactionId = transaction._id;
+    await payment.save();
 
     await logAudit({
       user: req.user,
@@ -135,37 +137,47 @@ const deletePatientPayment = async (req, res, next) => {
       // 1. Delete the PatientPayment document
       await PatientPayment.findByIdAndDelete(id);
 
-      // 2. Remove matching income Transaction
-      const payTime = new Date(paymentDate).getTime();
-      const txList = await Transaction.find({
-        patientId,
-        category: 'Accommodation',
-        type: 'income',
-        amount: paymentAmount
-      });
+      // 2. Remove the exact income transaction, with a legacy lookup for older records.
+      if (payment.transactionId) {
+        await Transaction.findByIdAndDelete(payment.transactionId);
+      } else {
+        const payTime = new Date(paymentDate).getTime();
+        const txList = await Transaction.find({
+          patientId,
+          category: 'Accommodation',
+          type: 'income',
+          amount: paymentAmount
+        });
 
-      let bestTx = null;
-      let minDiff = Infinity;
-      for (const tx of txList) {
-        const diff = Math.abs(new Date(tx.date).getTime() - payTime);
-        if (diff < minDiff) {
-          minDiff = diff;
-          bestTx = tx;
+        let bestTx = null;
+        let minDiff = Infinity;
+        for (const tx of txList) {
+          const diff = Math.abs(new Date(tx.date).getTime() - payTime);
+          if (diff < minDiff) {
+            minDiff = diff;
+            bestTx = tx;
+          }
         }
-      }
-      if (bestTx) {
-        await Transaction.findByIdAndDelete(bestTx._id);
+        if (bestTx) {
+          await Transaction.findByIdAndDelete(bestTx._id);
+        }
       }
 
       // 3. Remove from patient.timeline if present
       if (patient && Array.isArray(patient.timeline)) {
-        const tlIndex = patient.timeline.findIndex(ev =>
-          ev.type === 'payment' &&
-          Number(ev.amount) === paymentAmount &&
-          Math.abs(new Date(ev.date).getTime() - payTime) <= 24 * 60 * 60 * 1000
-        );
-        if (tlIndex !== -1) {
-          patient.timeline.splice(tlIndex, 1);
+        const tlEvent = patient.timeline.id(payment.timelineEventId) ||
+          patient.timeline.find(ev =>
+            ev.type === 'payment' &&
+            ev.relatedPaymentId?.toString() === payment._id.toString()
+          ) || (/الدفعة الأولى|تجديد الإقامة/.test(payment.notes || '')
+            ? patient.timeline.find(ev =>
+                ev.type === 'payment' &&
+                Number(ev.amount) === paymentAmount &&
+                Math.abs(new Date(ev.date).getTime() - new Date(paymentDate).getTime()) <= 24 * 60 * 60 * 1000
+              )
+            : null);
+        if (tlEvent) {
+          patient.timeline.pull(tlEvent._id);
           await patient.save();
         }
       }

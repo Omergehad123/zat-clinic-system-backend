@@ -8,6 +8,8 @@ const patientPaymentSchema = new mongoose.Schema(
     date: { type: Date, default: Date.now },
     paymentMethod: { type: String, default: 'Cash' },
     notes: { type: String, default: '' },
+    transactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' },
+    timelineEventId: { type: mongoose.Schema.Types.ObjectId },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
   },
   { timestamps: true }
